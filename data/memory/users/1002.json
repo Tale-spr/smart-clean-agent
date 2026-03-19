@@ -1,0 +1,27 @@
+{
+  "user_id": "1002",
+  "profile_snapshot": {
+    "user_id": "1002",
+    "city": "上海",
+    "name": "用户B",
+    "house_type": "70㎡公寓",
+    "floor_type": "瓷砖"
+  },
+  "preferences": [],
+  "environment": [
+    "瓷砖",
+    "小户型"
+  ],
+  "cleaning_habits": [],
+  "pain_points": [
+    "滤网维护"
+  ],
+  "recent_focuses": [
+    "什么?",
+    "滤网维护",
+    "滚刷更换",
+    "从今天的天气来看,保养扫地机器人有什么需要注意的?",
+    "如何高效设置清洁计划"
+  ],
+  "last_updated_at": "2026-03-18T23:58:56"
+}

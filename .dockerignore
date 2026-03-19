@@ -1,0 +1,14 @@
+.venv
+__pycache__
+.idea
+.vscode
+.git
+.gitignore
+.env
+logs
+chroma_db
+data/eval/results
+tests
+*.pyc
+*.pyo
+*.pyd

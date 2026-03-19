@@ -1,0 +1,6 @@
+external_data_path: data/external/records.csv
+user_profiles_path: data/external/user_profiles.csv
+session_store_dir: data/sessions
+user_memory_dir: data/memory/users
+report_memory_dir: data/memory/reports
+report_memory_month_window: 3

@@ -1,0 +1,27 @@
+{
+  "user_id": "1001",
+  "profile_snapshot": {
+    "user_id": "1001",
+    "city": "北京",
+    "name": "用户A",
+    "house_type": "65㎡公寓",
+    "floor_type": "木地板"
+  },
+  "preferences": [],
+  "environment": [
+    "木地板",
+    "小户型"
+  ],
+  "cleaning_habits": [],
+  "pain_points": [],
+  "recent_focuses": [
+    "再加2呢?",
+    "你好?你好!",
+    "我好",
+    "北京今天天气怎么样",
+    "如何清洗滚轮?",
+    "北京今天天气怎么样？",
+    "你好你好"
+  ],
+  "last_updated_at": "2026-03-19T22:28:59"
+}

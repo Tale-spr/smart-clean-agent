@@ -1,0 +1,20 @@
+{
+  "user_id": "1010",
+  "profile_snapshot": {
+    "user_id": "1010",
+    "city": "南京",
+    "name": "用户J",
+    "house_type": "95㎡三居",
+    "floor_type": "木地板"
+  },
+  "preferences": [],
+  "environment": [
+    "木地板"
+  ],
+  "cleaning_habits": [],
+  "pain_points": [],
+  "recent_focuses": [
+    "生成我这个月的使用报告"
+  ],
+  "last_updated_at": "2026-03-19T22:31:16"
+}
