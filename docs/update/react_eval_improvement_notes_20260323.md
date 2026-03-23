@@ -228,6 +228,3 @@
 - 评测路由
 - 环境类意图识别
 - 最终答案生成阶段的关键词覆盖能力
-
-# TODO
-工作区里像 README.md、prompts/main_prompt.txt、data/memory/... 这些还有既有改动，这轮没有继续动它们。
