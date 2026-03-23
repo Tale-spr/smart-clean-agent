@@ -2,7 +2,14 @@
 
 ## 1. 模块定位
 
-当前 `evaluation` 模块是一个**离线评测系统**，用于复用项目的真实 Agent 链路，对样例集做规则校验、要点评估和可选的 Judge 评估。它不会接入 `Streamlit` 页面，也不会进入线上主链路。
+当前 `evaluation` 模块是一个**离线评测系统**，用于复用项目真实 Agent 链路，对样例集做规则校验、要点评估和可选的 Judge 评估。它不会接入 `Streamlit` 页面，也不会进入线上主链路。
+
+当前默认评测两类不同性质的链路：
+
+- 普通问答：显式 LangGraph ReAct 主链路
+- 报告生成：独立高约束报告链路
+
+因此新版 `evaluation` 已不再把所有任务都按同一套“严格工具顺序”来评，而是按任务类型分别计算指标。
 
 当前实现目录：
 
@@ -20,10 +27,18 @@
 
 - 路由是否正确
 - 必需工具是否完整
-- 工具顺序是否合理
+- 普通问答工具是否合理
+- 报告链路关键依赖是否成立
 - 检索模式是否符合预期
 - required points 是否全部命中
-- 报告链路是否完整走通
+- 报告时间引用是否一致
+
+当前理解方式：
+
+- 普通问答主要看 `tool_usage_valid`
+- 报告生成主要看 `tool_dependency_valid + time_consistency_valid`
+
+`tool_sequence_valid` 仍然保留，但对普通问答已经降级为观测指标，不再作为主要硬门槛。
 
 ### 2.2 Point-Based
 
@@ -52,6 +67,12 @@ Judge 输出结构化结果：
 - `passed`
 - `reason`
 
+Judge 更适合发现这类问题：
+
+- 答案结构完整，但证据不够扎实
+- 答案命中了要点，但存在过度推断
+- 报告写得很像样，但数据和月份不一致
+
 ## 3. 数据集格式
 
 默认数据集为：
@@ -77,6 +98,10 @@ Judge 输出结构化结果：
 - `user_id`
 - `city`
 - `notes`
+- `forbidden_tools`
+- `allow_no_tool`
+- `target_month`
+- `allowed_trend_window`
 
 ### 3.2 枚举值约束
 
@@ -98,7 +123,24 @@ Judge 输出结构化结果：
 - `optional`
 - `forbidden`
 
-### 3.3 point 结构
+### 3.3 新版字段语义
+
+普通问答样例默认更关注：
+
+- `content_pass`
+- `tool_usage_valid`
+- 是否调用了越界工具
+- 是否出现明显冗余或重复工具调用
+- 是否允许无工具直接回答
+
+报告类样例默认更关注：
+
+- `required_tools_present`
+- `tool_dependency_valid`
+- `time_consistency_valid`
+- 报告内容质量
+
+### 3.4 point 结构
 
 每个 point 为对象：
 
@@ -110,7 +152,7 @@ Judge 输出结构化结果：
 }
 ```
 
-### 3.4 样例
+### 3.5 样例
 
 ```json
 {
@@ -136,6 +178,7 @@ Judge 输出结构化结果：
   ],
   "optional_points": [],
   "expected_retrieval_mode": "optional",
+  "allow_no_tool": false,
   "notes": "天气后可补充保养知识"
 }
 ```
@@ -148,6 +191,13 @@ Judge 输出结构化结果：
 2. 向量库已构建
 3. `DASHSCOPE_API_KEY` 已配置
 4. 如需天气相关链路更真实，建议配置 `AMAP_WEATHER_API_KEY`
+
+当前默认模型角色如下：
+
+- 在线主链路：`qwen-plus`
+- RAG 总结：`qwen-plus`
+- 批量离线评测：`qwen-flash`
+- Judge：`qwen-plus`
 
 先建库：
 
@@ -177,6 +227,12 @@ python src/smart_clean_agent/evaluation/run.py `
 python src/smart_clean_agent/evaluation/run.py --with-judge
 ```
 
+如果只想临时覆盖批量评测模型：
+
+```powershell
+python src/smart_clean_agent/evaluation/run.py --chat-model qwen-plus
+```
+
 指定 Judge 模型：
 
 ```powershell
@@ -184,6 +240,15 @@ python src/smart_clean_agent/evaluation/run.py `
   --with-judge `
   --judge-model qwen-plus
 ```
+
+说明：
+
+- `--chat-model` 只覆盖本轮评测执行模型，不影响线上主链路
+- `--judge-model` 只覆盖 Judge，不影响评测执行模型
+- 默认模型角色为：
+  - 评测执行：`qwen-flash`
+  - Judge：`qwen-plus`
+- 当前实现只支持切换模型名，不开放 `enable_thinking` 等推理参数
 
 ## 6. 输出结构
 
@@ -203,6 +268,8 @@ python src/smart_clean_agent/evaluation/run.py `
   "generated_at": "...",
   "rule_based_summary": {},
   "judge_based_summary": {},
+  "normal_summary": {},
+  "report_summary": {},
   "results": []
 }
 ```
@@ -234,8 +301,25 @@ python src/smart_clean_agent/evaluation/run.py `
 - `missing_required_points`
 - `content_pass`
 - `tool_sequence_valid`
+- `tool_usage_valid`
+- `unnecessary_tool_calls`
+- `repeated_tool_calls`
+- `tool_dependency_valid`
+- `time_consistency_valid`
 - `step_count`
 - `stop_reason`
+
+字段理解建议：
+
+- 普通问答优先看：
+  - `content_pass`
+  - `tool_usage_valid`
+  - `retrieval_mode_valid`
+- 报告生成优先看：
+  - `required_tools_present`
+  - `tool_dependency_valid`
+  - `time_consistency_valid`
+  - `content_pass`
 
 ### 6.4 summary 指标
 
@@ -250,6 +334,23 @@ python src/smart_clean_agent/evaluation/run.py `
 - `optional_point_hit_rate_avg`
 - `report_generation_success_rate`
 
+普通问答 summary：
+
+- `content_pass_rate`
+- `tool_usage_valid_rate`
+- `unexpected_tool_rate`
+- `required_point_hit_rate_avg`
+- `judge_pass_rate`
+
+报告 summary：
+
+- `required_tools_present_rate`
+- `tool_dependency_valid_rate`
+- `time_consistency_valid_rate`
+- `content_pass_rate`
+- `avg_groundedness_score`
+- `avg_report_quality_score`
+
 Judge summary：
 
 - `judge_pass_rate`
@@ -258,6 +359,12 @@ Judge summary：
 - `avg_groundedness_score`
 - `avg_tool_usage_score`
 - `avg_report_quality_score`
+
+推荐解读方式：
+
+- `normal_summary` 用来判断普通问答 ReAct 是否稳定
+- `report_summary` 用来判断报告链路是否 grounded、是否时间一致
+- `judge_based_summary` 用来判断答案语义质量，尤其适合发现“看起来答对，但证据不够”的问题
 
 ## 7. 对比两个版本
 
@@ -282,6 +389,8 @@ python src/smart_clean_agent/evaluation/compare.py `
 
 - `rule_based_summary_diff`
 - `judge_based_summary_diff`
+- `normal_summary_diff`
+- `report_summary_diff`
 - `improved_cases`
 - `regressed_cases`
 
@@ -317,20 +426,32 @@ python src/smart_clean_agent/evaluation/migrate_dataset.py `
 python src/smart_clean_agent/evaluation/run.py
 ```
 
-### 9.2 大版本对比
+这条命令默认会用 `qwen-flash`，更适合低成本批量回归，重点看：
 
-大改动后建议两次跑结果，再执行：
+- 主流程是否回退
+- 普通问答 `normal_summary`
+- 报告链路 `report_summary`
 
-```powershell
-python src/smart_clean_agent/evaluation/compare.py before.json after.json
-```
-
-### 9.3 更高质量判断
+### 9.2 更高质量判断
 
 当你觉得规则层已经不足以反映真实效果时，再加：
 
 ```powershell
 python src/smart_clean_agent/evaluation/run.py --with-judge
+```
+
+Judge 默认使用 `qwen-plus`，更适合：
+
+- 判断答案语义质量
+- 发现 groundedness 问题
+- 判断“流程差不多，但答案是否真的可信”
+
+### 9.3 大版本对比
+
+大改动后建议两次跑结果，再执行：
+
+```powershell
+python src/smart_clean_agent/evaluation/compare.py before.json after.json
 ```
 
 ## 10. 常见问题
@@ -352,7 +473,8 @@ python src/smart_clean_agent/evaluation/run.py --with-judge
 - `execution_mode`
 - `route_correct`
 - `missing_required_tools`
-- `tool_sequence_valid`
+- `tool_dependency_valid`
+- `time_consistency_valid`
 - `missing_required_points`
 
 ### 10.4 Judge 失败
@@ -363,6 +485,8 @@ python src/smart_clean_agent/evaluation/run.py --with-judge
 - Judge 模型是否可用
 - Judge 输出是否为合法 JSON
 
+Judge 现在已经做了更宽松的结构化解析，但如果模型输出完全偏离 JSON，仍可能出现单条 case 的 Judge 失败。
+
 ## 11. 当前结论
 
 新版 `evaluation` 已不再只是“关键词命中脚本”，而是：
@@ -371,8 +495,13 @@ python src/smart_clean_agent/evaluation/run.py --with-judge
 - point 层校验内容覆盖
 - 可选 judge 层校验语义质量
 
+同时评测规则已经按任务类型区分：
+
+- 普通问答：结果正确性和工具合理性优先
+- 报告生成：关键数据依赖和时间一致性优先
+
 这让它更适合用来比较：
 
 - 普通问答 ReAct 的稳定性
-- 报告链路的工具顺序
+- 报告链路的关键依赖和时间一致性
 - 优化前后内容质量的真实变化

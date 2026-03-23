@@ -1,2 +1,6 @@
-chat_model_name: qwen3-max
-embedding_model_name: text-embedding-v4
+models:
+  primary_chat: qwen-plus
+  rag_chat: qwen-plus
+  batch_eval: qwen-flash
+  judge: qwen-plus
+  embedding: text-embedding-v4

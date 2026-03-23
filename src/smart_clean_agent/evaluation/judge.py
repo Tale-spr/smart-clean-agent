@@ -1,5 +1,7 @@
 import json
+import math
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from dataclasses import asdict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -33,14 +35,50 @@ def _extract_json_payload(content: str) -> dict:
 
 
 def _validate_score(value, field_name: str) -> int:
-    if not isinstance(value, int) or value < 0 or value > 5:
+    if isinstance(value, bool):
         raise ValueError(f"{field_name} 必须为 0-5 的整数")
-    return value
+
+    numeric_value: Decimal | None = None
+    if isinstance(value, int):
+        numeric_value = Decimal(value)
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} 必须为 0-5 的整数")
+        numeric_value = Decimal(str(value))
+    elif isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{field_name} 必须为 0-5 的整数")
+        matched = re.search(r"-?\d+(?:\.\d+)?", normalized)
+        if not matched:
+            raise ValueError(f"{field_name} 必须为 0-5 的整数")
+        try:
+            numeric_value = Decimal(matched.group(0))
+        except InvalidOperation as exc:
+            raise ValueError(f"{field_name} 必须为 0-5 的整数") from exc
+    else:
+        raise ValueError(f"{field_name} 必须为 0-5 的整数")
+
+    if numeric_value < 0 or numeric_value > 5:
+        raise ValueError(f"{field_name} 必须为 0-5 的整数")
+    return int(numeric_value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _normalize_passed(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "通过", "是"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "不通过", "否"}:
+            return False
+    return bool(value)
 
 
 class JudgeEvaluator:
     def __init__(self, model_name: str | None = None):
-        self.model = create_chat_model(model_name=model_name)
+        self.model = create_chat_model(model_name=model_name, role="judge")
 
     def evaluate(self, case: EvalCase, answer: str, trace: EvalTrace) -> JudgeResult:
         retrieved_docs_summary = [
@@ -74,6 +112,6 @@ class JudgeEvaluator:
             groundedness_score=_validate_score(payload.get("groundedness_score"), "groundedness_score"),
             tool_usage_score=_validate_score(payload.get("tool_usage_score"), "tool_usage_score"),
             report_quality_score=_validate_score(payload.get("report_quality_score"), "report_quality_score"),
-            passed=bool(payload.get("passed")),
+            passed=_normalize_passed(payload.get("passed")),
             reason=str(payload.get("reason") or "").strip(),
         )

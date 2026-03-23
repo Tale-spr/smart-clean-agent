@@ -26,6 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset", dest="dataset_path", help="JSONL 格式的评测数据集路径")
     parser.add_argument("--output-dir", dest="output_dir", help="评测结果输出目录")
     parser.add_argument("--with-judge", action="store_true", help="启用 LLM-as-a-Judge 评测")
+    parser.add_argument("--chat-model", dest="chat_model_name", help="评测执行链路使用的模型名称")
     parser.add_argument("--judge-model", dest="judge_model_name", help="Judge 使用的模型名称")
     return parser.parse_args(argv)
 
@@ -50,9 +51,14 @@ def build_eval_runtime_context(case: EvalCase) -> dict:
 
 
 class AgentEvaluationExecutor:
-    def __init__(self, with_judge: bool = False, judge_model_name: str | None = None):
+    def __init__(
+        self,
+        with_judge: bool = False,
+        judge_model_name: str | None = None,
+        chat_model_name: str | None = None,
+    ):
         ensure_vector_store_ready()
-        chat_model = create_chat_model()
+        chat_model = create_chat_model(model_name=chat_model_name, role="batch_eval")
         embedding_model = create_embedding_model()
         vector_store_service = VectorStoreService(embedding_function=embedding_model)
         self.rag_service = RagSummarizeService(
@@ -106,6 +112,12 @@ class AgentEvaluationExecutor:
 
 
 def print_summary(rule_summary, judge_summary, json_path: Path, csv_path: Path) -> None:
+    def _format_percent(value):
+        return "n/a" if value is None else f"{value:.2%}"
+
+    def _format_number(value):
+        return "n/a" if value is None else f"{value:.2f}"
+
     print("离线评测完成")
     print(f"总样例数: {rule_summary.total_cases}")
     print(f"rule.content_pass_rate: {rule_summary.content_pass_rate:.2%}")
@@ -116,9 +128,9 @@ def print_summary(rule_summary, judge_summary, json_path: Path, csv_path: Path) 
     print(f"rule.required_point_hit_rate_avg: {rule_summary.required_point_hit_rate_avg:.2%}")
     print(f"rule.report_generation_success_rate: {rule_summary.report_generation_success_rate:.2%}")
     if judge_summary.enabled:
-        print(f"judge.judge_pass_rate: {judge_summary.judge_pass_rate:.2%}")
-        print(f"judge.avg_correctness_score: {judge_summary.avg_correctness_score:.2f}")
-        print(f"judge.avg_completeness_score: {judge_summary.avg_completeness_score:.2f}")
+        print(f"judge.judge_pass_rate: {_format_percent(judge_summary.judge_pass_rate)}")
+        print(f"judge.avg_correctness_score: {_format_number(judge_summary.avg_correctness_score)}")
+        print(f"judge.avg_completeness_score: {_format_number(judge_summary.avg_completeness_score)}")
     else:
         print("judge: disabled")
     print(f"JSON结果文件: {json_path}")
@@ -130,6 +142,7 @@ def main(
     output_dir: str | None = None,
     with_judge: bool = False,
     judge_model_name: str | None = None,
+    chat_model_name: str | None = None,
     argv: list[str] | None = None,
 ) -> int:
     if argv is not None:
@@ -138,17 +151,33 @@ def main(
         output_dir = args.output_dir
         with_judge = args.with_judge
         judge_model_name = args.judge_model_name
+        chat_model_name = args.chat_model_name
 
     try:
         cases = load_eval_cases(dataset_path)
-        executor = AgentEvaluationExecutor(with_judge=with_judge, judge_model_name=judge_model_name)
-        results, rule_summary, judge_summary = run_evaluation(
+        executor = AgentEvaluationExecutor(
+            with_judge=with_judge,
+            judge_model_name=judge_model_name,
+            chat_model_name=chat_model_name,
+        )
+        results, rule_summary, judge_summary, normal_summary, report_summary = run_evaluation(
             cases,
             executor.execute_case,
             judge=executor.judge_case if with_judge else None,
         )
-        json_path, csv_path = write_evaluation_outputs(results, rule_summary, judge_summary, output_dir)
+        json_path, csv_path = write_evaluation_outputs(
+            results,
+            rule_summary,
+            judge_summary,
+            normal_summary,
+            report_summary,
+            output_dir,
+        )
         print_summary(rule_summary, judge_summary, json_path, csv_path)
+        print(f"normal.content_pass_rate: {normal_summary.content_pass_rate:.2%}")
+        print(f"normal.tool_usage_valid_rate: {normal_summary.tool_usage_valid_rate:.2%}")
+        print(f"report.tool_dependency_valid_rate: {report_summary.tool_dependency_valid_rate:.2%}")
+        print(f"report.time_consistency_valid_rate: {report_summary.time_consistency_valid_rate:.2%}")
         return 0
     except Exception as exc:
         print(f"离线评测失败: {str(exc)}", file=sys.stderr)

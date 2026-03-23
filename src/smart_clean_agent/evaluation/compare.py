@@ -37,7 +37,9 @@ def _rule_score(result: dict) -> float:
     return (
         float(bool(rule.get("route_correct")))
         + float(bool(rule.get("required_tools_present")))
-        + float(bool(rule.get("tool_sequence_valid")))
+        + float(bool(rule.get("tool_usage_valid", rule.get("tool_sequence_valid"))))
+        + float(bool(rule.get("tool_dependency_valid", True)))
+        + float(bool(rule.get("time_consistency_valid", True)))
         + float(bool(rule.get("retrieval_mode_valid")))
         + float(rule.get("required_point_hit_rate", 0.0))
     )
@@ -74,6 +76,14 @@ def compare_results(before_payload: dict, after_payload: dict) -> dict:
         "judge_based_summary_diff": _diff_summary(
             before_payload.get("judge_based_summary", {}),
             after_payload.get("judge_based_summary", {}),
+        ),
+        "normal_summary_diff": _diff_summary(
+            before_payload.get("normal_summary", {}),
+            after_payload.get("normal_summary", {}),
+        ),
+        "report_summary_diff": _diff_summary(
+            before_payload.get("report_summary", {}),
+            after_payload.get("report_summary", {}),
         ),
         "improved_cases": improved_cases,
         "regressed_cases": regressed_cases,

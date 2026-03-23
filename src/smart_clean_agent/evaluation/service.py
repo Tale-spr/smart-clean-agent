@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ REQUIRED_CASE_FIELDS = {
     "expected_retrieval_mode",
 }
 ALLOWED_CATEGORIES = {"faq", "troubleshooting", "environment_fit", "report_generation"}
+NORMAL_CATEGORIES = {"faq", "troubleshooting", "environment_fit"}
 ALLOWED_ROUTES = {"normal", "report"}
 ALLOWED_RETRIEVAL_MODES = {"required", "optional", "forbidden"}
 ALLOWED_TOOLS_BY_ROUTE = {
@@ -33,6 +35,10 @@ ALLOWED_TOOLS_BY_ROUTE = {
     },
 }
 VALID_STOP_REASONS = {"", "enough_information", "max_steps_reached", "tool_failed", "unsupported_request"}
+YEAR_MONTH_PATTERN = re.compile(r"(?P<year>\d{4})\s*(?:年|/|-)\s*(?P<month>\d{1,2})\s*月?")
+YEAR_MONTH_RANGE_PATTERN = re.compile(
+    r"(?P<year>\d{4})\s*(?:年|/|-)\s*(?P<start>\d{1,2})\s*月?\s*[—\-–~至到]+\s*(?P<end>\d{1,2})\s*月"
+)
 
 
 @dataclass
@@ -56,6 +62,10 @@ class EvalCase:
     user_id: str = "1001"
     city: str = "北京"
     notes: str = ""
+    forbidden_tools: list[str] | None = None
+    allow_no_tool: bool = False
+    target_month: str = ""
+    allowed_trend_window: list[str] | None = None
 
 
 @dataclass
@@ -86,6 +96,11 @@ class RuleBasedResult:
     stop_reason: str
     stop_reason_valid: bool
     tool_sequence_valid: bool
+    tool_usage_valid: bool
+    unnecessary_tool_calls: list[str]
+    repeated_tool_calls: list[str]
+    tool_dependency_valid: bool
+    time_consistency_valid: bool
 
 
 @dataclass
@@ -129,6 +144,27 @@ class RuleBasedSummary:
 
 
 @dataclass
+class NormalSummary:
+    total_cases: int
+    content_pass_rate: float
+    tool_usage_valid_rate: float
+    unexpected_tool_rate: float
+    required_point_hit_rate_avg: float
+    judge_pass_rate: float | None = None
+
+
+@dataclass
+class ReportSummary:
+    total_cases: int
+    required_tools_present_rate: float
+    tool_dependency_valid_rate: float
+    time_consistency_valid_rate: float
+    content_pass_rate: float
+    avg_groundedness_score: float | None = None
+    avg_report_quality_score: float | None = None
+
+
+@dataclass
 class JudgeBasedSummary:
     enabled: bool
     total_cases: int = 0
@@ -154,6 +190,34 @@ def parse_eval_points(raw_points: list[dict] | None, prefix: str) -> list[EvalPo
             aliases.insert(0, label)
         points.append(EvalPoint(point_id=point_id, label=label, aliases=aliases))
     return points
+
+
+def _normalize_year_month(value: str) -> str:
+    normalized = value.strip()
+    match = YEAR_MONTH_PATTERN.search(normalized)
+    if match:
+        return f"{match.group('year')}-{int(match.group('month')):02d}"
+    if re.fullmatch(r"\d{4}-\d{2}", normalized):
+        return normalized
+    return ""
+
+
+def _extract_year_months(text: str) -> list[str]:
+    months: list[str] = []
+    seen: set[str] = set()
+    for match in YEAR_MONTH_RANGE_PATTERN.finditer(text or ""):
+        start = f"{match.group('year')}-{int(match.group('start')):02d}"
+        end = f"{match.group('year')}-{int(match.group('end')):02d}"
+        for month in (start, end):
+            if month not in seen:
+                seen.add(month)
+                months.append(month)
+    for match in YEAR_MONTH_PATTERN.finditer(text or ""):
+        month = f"{match.group('year')}-{int(match.group('month')):02d}"
+        if month not in seen:
+            seen.add(month)
+            months.append(month)
+    return months
 
 
 def load_eval_cases(jsonl_path: str | Path | None = None) -> list[EvalCase]:
@@ -195,14 +259,23 @@ def load_eval_cases(jsonl_path: str | Path | None = None) -> list[EvalCase]:
 
             required_tools = [str(tool).strip() for tool in raw_case.get("required_tools", []) if str(tool).strip()]
             optional_tools = [str(tool).strip() for tool in raw_case.get("optional_tools", []) if str(tool).strip()]
-            if not required_tools:
-                raise ValueError(f"第{index}条评测数据缺少 required_tools")
+            forbidden_tools = [str(tool).strip() for tool in raw_case.get("forbidden_tools", []) if str(tool).strip()]
             allowed_tools = ALLOWED_TOOLS_BY_ROUTE[expected_route]
-            invalid_tools = [tool for tool in required_tools + optional_tools if tool not in allowed_tools]
+            invalid_tools = [tool for tool in required_tools + optional_tools + forbidden_tools if tool not in allowed_tools]
             if invalid_tools:
                 raise ValueError(f"第{index}条评测数据包含非法工具: {', '.join(invalid_tools)}")
             if set(required_tools) & set(optional_tools):
                 raise ValueError(f"第{index}条评测数据的 required_tools 与 optional_tools 不应重复")
+
+            allow_no_tool = bool(raw_case.get("allow_no_tool", category in {"faq", "troubleshooting"}))
+            target_month = _normalize_year_month(str(raw_case.get("target_month") or ""))
+            if not target_month and expected_route == "report":
+                target_month = _normalize_year_month(query)
+            allowed_trend_window = [
+                normalized_month
+                for raw_month in raw_case.get("allowed_trend_window", [])
+                if (normalized_month := _normalize_year_month(str(raw_month)))
+            ]
 
             cases.append(
                 EvalCase(
@@ -218,6 +291,10 @@ def load_eval_cases(jsonl_path: str | Path | None = None) -> list[EvalCase]:
                     user_id=str(raw_case.get("user_id") or "1001").strip() or "1001",
                     city=str(raw_case.get("city") or "北京").strip() or "北京",
                     notes=str(raw_case.get("notes") or "").strip(),
+                    forbidden_tools=forbidden_tools,
+                    allow_no_tool=allow_no_tool,
+                    target_month=target_month,
+                    allowed_trend_window=allowed_trend_window,
                 )
             )
 
@@ -237,7 +314,7 @@ def validate_tool_sequence(tool_calls: list[str]) -> bool:
     return True
 
 
-def validate_report_tool_sequence(tool_calls: list[str], required_tools: list[str]) -> bool:
+def validate_report_tool_dependency(tool_calls: list[str], required_tools: list[str]) -> bool:
     if any(tool not in tool_calls for tool in required_tools):
         return False
 
@@ -245,11 +322,12 @@ def validate_report_tool_sequence(tool_calls: list[str], required_tools: list[st
         return before not in tool_calls or after not in tool_calls or tool_calls.index(before) < tool_calls.index(after)
 
     return (
-        is_before("get_user_id", "fill_context_for_report")
-        and is_before("get_current_month", "fill_context_for_report")
+        is_before("get_user_id", "fetch_external_data")
+        and is_before("get_current_month", "fetch_external_data")
         and is_before("fill_context_for_report", "fetch_external_data")
         and is_before("fill_context_for_report", "fetch_external_history")
-        and is_before("fetch_external_data", "fetch_external_history")
+        and is_before("get_user_id", "fetch_external_history")
+        and is_before("get_current_month", "fetch_external_history")
     )
 
 
@@ -286,9 +364,37 @@ def _evaluate_points(points: list[EvalPoint], answer: str) -> tuple[float, list[
     return hit_rate, missing
 
 
-def _unexpected_tools(tool_calls: list[str], expected_route: str) -> list[str]:
-    allowed_tools = ALLOWED_TOOLS_BY_ROUTE.get(expected_route, set())
-    return [tool for tool in tool_calls if tool not in allowed_tools]
+def _deduplicate_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
+
+
+def _unexpected_tools(case: EvalCase, tool_calls: list[str]) -> list[str]:
+    allowed_tools = ALLOWED_TOOLS_BY_ROUTE.get(case.expected_route, set())
+    forbidden = set(case.forbidden_tools or [])
+    return _deduplicate_preserve_order([tool for tool in tool_calls if tool not in allowed_tools or tool in forbidden])
+
+
+def _unnecessary_tool_calls(case: EvalCase, tool_calls: list[str]) -> list[str]:
+    recommended = set(case.required_tools) | set(case.optional_tools)
+    forbidden = set(case.forbidden_tools or [])
+    unnecessary = [tool for tool in tool_calls if tool not in recommended and tool not in forbidden]
+    return _deduplicate_preserve_order(unnecessary)
+
+
+def _repeated_tool_calls(tool_calls: list[str]) -> list[str]:
+    duplicates: list[str] = []
+    counts: dict[str, int] = {}
+    for tool in tool_calls:
+        counts[tool] = counts.get(tool, 0) + 1
+        if counts[tool] == 2:
+            duplicates.append(tool)
+    return duplicates
 
 
 def _retrieval_mode_valid(expected_mode: str, retrieval_hit: bool) -> bool:
@@ -299,22 +405,58 @@ def _retrieval_mode_valid(expected_mode: str, retrieval_hit: bool) -> bool:
     return True
 
 
+def _time_consistency_valid(case: EvalCase, answer: str) -> bool:
+    if case.category != "report_generation":
+        return True
+
+    target_month = case.target_month or _normalize_year_month(case.query)
+    if not target_month:
+        return True
+
+    mentioned_months = _extract_year_months(answer)
+    if not mentioned_months:
+        return False
+    if target_month not in mentioned_months:
+        return False
+
+    allowed_trend_window = set(case.allowed_trend_window or [])
+    if allowed_trend_window:
+        allowed = allowed_trend_window | {target_month}
+        return all(month in allowed for month in mentioned_months)
+
+    return all(month <= target_month for month in mentioned_months)
+
+
 def _build_rule_based_result(case: EvalCase, trace: EvalTrace, answer: str) -> RuleBasedResult:
     route_correct = trace.execution_mode == case.expected_route
     missing_required_tools = [tool for tool in case.required_tools if tool not in trace.tool_calls]
     required_tools_present = not missing_required_tools
-    unexpected_tools = _unexpected_tools(trace.tool_calls, case.expected_route)
+    unexpected_tools = _unexpected_tools(case, trace.tool_calls)
     unexpected_tools_present = bool(unexpected_tools)
+    unnecessary_tool_calls = _unnecessary_tool_calls(case, trace.tool_calls)
+    repeated_tool_calls = _repeated_tool_calls(trace.tool_calls)
     retrieval_mode_valid = _retrieval_mode_valid(case.expected_retrieval_mode, trace.retrieval_hit)
     required_point_hit_rate, missing_required_points = _evaluate_points(case.required_points, answer)
     optional_point_hit_rate, _ = _evaluate_points(case.optional_points, answer)
     content_pass = required_point_hit_rate == 1.0
     step_limit_respected = trace.step_count <= 5
     stop_reason_valid = trace.stop_reason in VALID_STOP_REASONS
-
     tool_sequence_valid = trace.tool_sequence_valid
+    tool_dependency_valid = True
+    time_consistency_valid = True
+
     if case.expected_route == "report":
-        tool_sequence_valid = tool_sequence_valid and validate_report_tool_sequence(trace.tool_calls, case.required_tools)
+        tool_dependency_valid = validate_report_tool_dependency(trace.tool_calls, case.required_tools)
+        time_consistency_valid = _time_consistency_valid(case, answer)
+
+    no_tool_invalid = not trace.tool_calls and not case.allow_no_tool
+    tool_usage_valid = (
+        required_tools_present
+        and not unexpected_tools_present
+        and not repeated_tool_calls
+        and not unnecessary_tool_calls
+        and not no_tool_invalid
+    )
 
     return RuleBasedResult(
         route_correct=route_correct,
@@ -332,6 +474,11 @@ def _build_rule_based_result(case: EvalCase, trace: EvalTrace, answer: str) -> R
         stop_reason=trace.stop_reason,
         stop_reason_valid=stop_reason_valid,
         tool_sequence_valid=tool_sequence_valid,
+        tool_usage_valid=tool_usage_valid,
+        unnecessary_tool_calls=unnecessary_tool_calls,
+        repeated_tool_calls=repeated_tool_calls,
+        tool_dependency_valid=tool_dependency_valid,
+        time_consistency_valid=time_consistency_valid,
     )
 
 
@@ -342,7 +489,17 @@ def evaluate_case(
 ) -> EvalResult:
     answer, trace = executor(case)
     rule_based = _build_rule_based_result(case, trace, answer)
-    judge_based = judge(case, answer, trace) if judge else JudgeResult(enabled=False)
+    if judge:
+        try:
+            judge_based = judge(case, answer, trace)
+        except Exception as exc:
+            judge_based = JudgeResult(
+                enabled=True,
+                passed=False,
+                reason=f"Judge 执行失败: {str(exc)}",
+            )
+    else:
+        judge_based = JudgeResult(enabled=False)
     return EvalResult(
         case_id=case.case_id,
         query=case.query,
@@ -378,7 +535,8 @@ def summarize_rule_results(results: Iterable[EvalResult]) -> RuleBasedSummary:
             sum(
                 result.rule_based.route_correct
                 and result.rule_based.required_tools_present
-                and result.rule_based.tool_sequence_valid
+                and result.rule_based.tool_dependency_valid
+                and result.rule_based.time_consistency_valid
                 and result.rule_based.content_pass
                 and bool(result.answer.strip())
                 for result in report_cases
@@ -386,6 +544,33 @@ def summarize_rule_results(results: Iterable[EvalResult]) -> RuleBasedSummary:
             if report_cases
             else 0.0
         ),
+    )
+
+
+def summarize_normal_results(results: Iterable[EvalResult]) -> NormalSummary:
+    result_list = [result for result in results if result.category in NORMAL_CATEGORIES]
+    if not result_list:
+        return NormalSummary(
+            total_cases=0,
+            content_pass_rate=0.0,
+            tool_usage_valid_rate=0.0,
+            unexpected_tool_rate=0.0,
+            required_point_hit_rate_avg=0.0,
+            judge_pass_rate=None,
+        )
+
+    judge_enabled_cases = [result for result in result_list if result.judge_based.enabled]
+    judge_pass_rate = None
+    if judge_enabled_cases:
+        judge_pass_rate = sum(bool(result.judge_based.passed) for result in judge_enabled_cases) / len(judge_enabled_cases)
+
+    return NormalSummary(
+        total_cases=len(result_list),
+        content_pass_rate=sum(result.rule_based.content_pass for result in result_list) / len(result_list),
+        tool_usage_valid_rate=sum(result.rule_based.tool_usage_valid for result in result_list) / len(result_list),
+        unexpected_tool_rate=sum(result.rule_based.unexpected_tools_present for result in result_list) / len(result_list),
+        required_point_hit_rate_avg=sum(result.rule_based.required_point_hit_rate for result in result_list) / len(result_list),
+        judge_pass_rate=judge_pass_rate,
     )
 
 
@@ -413,13 +598,51 @@ def summarize_judge_results(results: Iterable[EvalResult]) -> JudgeBasedSummary:
     )
 
 
+def summarize_report_results(results: Iterable[EvalResult]) -> ReportSummary:
+    result_list = [result for result in results if result.category == "report_generation"]
+    if not result_list:
+        return ReportSummary(
+            total_cases=0,
+            required_tools_present_rate=0.0,
+            tool_dependency_valid_rate=0.0,
+            time_consistency_valid_rate=0.0,
+            content_pass_rate=0.0,
+            avg_groundedness_score=None,
+            avg_report_quality_score=None,
+        )
+
+    judge_enabled_cases = [result for result in result_list if result.judge_based.enabled]
+
+    def _avg(values: list[int | None]) -> float | None:
+        filtered = [value for value in values if value is not None]
+        if not filtered:
+            return None
+        return sum(filtered) / len(filtered)
+
+    return ReportSummary(
+        total_cases=len(result_list),
+        required_tools_present_rate=sum(result.rule_based.required_tools_present for result in result_list) / len(result_list),
+        tool_dependency_valid_rate=sum(result.rule_based.tool_dependency_valid for result in result_list) / len(result_list),
+        time_consistency_valid_rate=sum(result.rule_based.time_consistency_valid for result in result_list) / len(result_list),
+        content_pass_rate=sum(result.rule_based.content_pass for result in result_list) / len(result_list),
+        avg_groundedness_score=_avg([result.judge_based.groundedness_score for result in judge_enabled_cases]),
+        avg_report_quality_score=_avg([result.judge_based.report_quality_score for result in judge_enabled_cases]),
+    )
+
+
 def run_evaluation(
     cases: list[EvalCase],
     executor: Callable[[EvalCase], tuple[str, EvalTrace]],
     judge: Callable[[EvalCase, str, EvalTrace], JudgeResult] | None = None,
-) -> tuple[list[EvalResult], RuleBasedSummary, JudgeBasedSummary]:
+) -> tuple[list[EvalResult], RuleBasedSummary, JudgeBasedSummary, NormalSummary, ReportSummary]:
     results = [evaluate_case(case, executor, judge=judge) for case in cases]
-    return results, summarize_rule_results(results), summarize_judge_results(results)
+    return (
+        results,
+        summarize_rule_results(results),
+        summarize_judge_results(results),
+        summarize_normal_results(results),
+        summarize_report_results(results),
+    )
 
 
 def _serialize_result(result: EvalResult) -> dict[str, object]:
@@ -440,6 +663,8 @@ def write_evaluation_outputs(
     results: list[EvalResult],
     rule_summary: RuleBasedSummary,
     judge_summary: JudgeBasedSummary,
+    normal_summary: NormalSummary,
+    report_summary: ReportSummary,
     output_dir: str | Path | None = None,
 ) -> tuple[Path, Path]:
     output_path = Path(output_dir or DEFAULT_RESULTS_DIR)
@@ -452,6 +677,8 @@ def write_evaluation_outputs(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "rule_based_summary": _round_floats(asdict(rule_summary)),
         "judge_based_summary": _round_floats(asdict(judge_summary)),
+        "normal_summary": _round_floats(asdict(normal_summary)),
+        "report_summary": _round_floats(asdict(report_summary)),
         "results": [_serialize_result(result) for result in results],
     }
     with open(json_path, "w", encoding="utf-8") as f:
@@ -474,6 +701,11 @@ def write_evaluation_outputs(
             "missing_required_points",
             "content_pass",
             "tool_sequence_valid",
+            "tool_usage_valid",
+            "unnecessary_tool_calls",
+            "repeated_tool_calls",
+            "tool_dependency_valid",
+            "time_consistency_valid",
             "step_count",
             "stop_reason",
             "judge_enabled",
@@ -505,6 +737,11 @@ def write_evaluation_outputs(
                     "missing_required_points": "|".join(result.rule_based.missing_required_points),
                     "content_pass": result.rule_based.content_pass,
                     "tool_sequence_valid": result.rule_based.tool_sequence_valid,
+                    "tool_usage_valid": result.rule_based.tool_usage_valid,
+                    "unnecessary_tool_calls": "|".join(result.rule_based.unnecessary_tool_calls),
+                    "repeated_tool_calls": "|".join(result.rule_based.repeated_tool_calls),
+                    "tool_dependency_valid": result.rule_based.tool_dependency_valid,
+                    "time_consistency_valid": result.rule_based.time_consistency_valid,
                     "step_count": result.rule_based.step_count,
                     "stop_reason": result.rule_based.stop_reason,
                     "judge_enabled": result.judge_based.enabled,

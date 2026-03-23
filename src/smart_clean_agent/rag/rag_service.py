@@ -31,7 +31,7 @@ class RagSummarizeService:
         self.retriever = self.vector_store.get_retriever()
         self.prompt_text = load_rag_prompts()
         self.prompt_template = PromptTemplate.from_template(self.prompt_text)
-        self.model = model or create_chat_model()
+        self.model = model or create_chat_model(role="rag_chat")
         self.last_retrieved_docs: list[Document] = []
         self.trace_callback: Callable[[str, list[Document]], None] | None = None
         self.chain = self._init_chain()

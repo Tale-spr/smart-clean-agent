@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from smart_clean_agent.evaluation import run
-from smart_clean_agent.evaluation.service import EvalCase, JudgeBasedSummary, RuleBasedSummary
+from smart_clean_agent.evaluation.service import EvalCase, JudgeBasedSummary, NormalSummary, ReportSummary, RuleBasedSummary
 
 
 class EvalRunTestCase(unittest.TestCase):
@@ -31,11 +31,12 @@ class EvalRunTestCase(unittest.TestCase):
             query="普通问题",
             category="faq",
             expected_route="normal",
-            required_tools=["rag_summarize"],
-            optional_tools=[],
+            required_tools=[],
+            optional_tools=["rag_summarize"],
             required_points=[],
             optional_points=[],
             expected_retrieval_mode="required",
+            allow_no_tool=True,
         )
 
         runtime_context = run.build_eval_runtime_context(case)
@@ -58,6 +59,23 @@ class EvalRunTestCase(unittest.TestCase):
             report_generation_success_rate=1.0,
         )
         fake_judge_summary = JudgeBasedSummary(enabled=False)
+        fake_normal_summary = NormalSummary(
+            total_cases=1,
+            content_pass_rate=1.0,
+            tool_usage_valid_rate=1.0,
+            unexpected_tool_rate=0.0,
+            required_point_hit_rate_avg=1.0,
+            judge_pass_rate=None,
+        )
+        fake_report_summary = ReportSummary(
+            total_cases=0,
+            required_tools_present_rate=0.0,
+            tool_dependency_valid_rate=0.0,
+            time_consistency_valid_rate=0.0,
+            content_pass_rate=0.0,
+            avg_groundedness_score=None,
+            avg_report_quality_score=None,
+        )
 
         with patch("smart_clean_agent.evaluation.run.load_eval_cases", return_value=fake_cases):
             with patch("smart_clean_agent.evaluation.run.AgentEvaluationExecutor") as mock_executor_cls:
@@ -65,7 +83,7 @@ class EvalRunTestCase(unittest.TestCase):
                 mock_executor_cls.return_value = executor
                 with patch(
                     "smart_clean_agent.evaluation.run.run_evaluation",
-                    return_value=(fake_results, fake_rule_summary, fake_judge_summary),
+                    return_value=(fake_results, fake_rule_summary, fake_judge_summary, fake_normal_summary, fake_report_summary),
                 ):
                     with patch(
                         "smart_clean_agent.evaluation.run.write_evaluation_outputs",
@@ -74,7 +92,7 @@ class EvalRunTestCase(unittest.TestCase):
                         result = run.main()
 
         self.assertEqual(result, 0)
-        mock_executor_cls.assert_called_once_with(with_judge=False, judge_model_name=None)
+        mock_executor_cls.assert_called_once_with(with_judge=False, judge_model_name=None, chat_model_name=None)
 
     def test_main_returns_zero_on_success_with_judge(self):
         fake_rule_summary = RuleBasedSummary(
@@ -98,6 +116,23 @@ class EvalRunTestCase(unittest.TestCase):
             avg_tool_usage_score=5.0,
             avg_report_quality_score=0.0,
         )
+        fake_normal_summary = NormalSummary(
+            total_cases=1,
+            content_pass_rate=1.0,
+            tool_usage_valid_rate=1.0,
+            unexpected_tool_rate=0.0,
+            required_point_hit_rate_avg=1.0,
+            judge_pass_rate=1.0,
+        )
+        fake_report_summary = ReportSummary(
+            total_cases=0,
+            required_tools_present_rate=0.0,
+            tool_dependency_valid_rate=0.0,
+            time_consistency_valid_rate=0.0,
+            content_pass_rate=0.0,
+            avg_groundedness_score=None,
+            avg_report_quality_score=None,
+        )
 
         with patch("smart_clean_agent.evaluation.run.load_eval_cases", return_value=[object()]):
             with patch("smart_clean_agent.evaluation.run.AgentEvaluationExecutor") as mock_executor_cls:
@@ -106,7 +141,7 @@ class EvalRunTestCase(unittest.TestCase):
                 mock_executor_cls.return_value = executor
                 with patch(
                     "smart_clean_agent.evaluation.run.run_evaluation",
-                    return_value=([object()], fake_rule_summary, fake_judge_summary),
+                    return_value=([object()], fake_rule_summary, fake_judge_summary, fake_normal_summary, fake_report_summary),
                 ):
                     with patch(
                         "smart_clean_agent.evaluation.run.write_evaluation_outputs",
@@ -115,7 +150,62 @@ class EvalRunTestCase(unittest.TestCase):
                         result = run.main(argv=["--with-judge", "--judge-model", "qwen-plus"])
 
         self.assertEqual(result, 0)
-        mock_executor_cls.assert_called_once_with(with_judge=True, judge_model_name="qwen-plus")
+        mock_executor_cls.assert_called_once_with(
+            with_judge=True,
+            judge_model_name="qwen-plus",
+            chat_model_name=None,
+        )
+
+    def test_main_passes_explicit_chat_model_to_executor(self):
+        fake_rule_summary = RuleBasedSummary(
+            total_cases=1,
+            route_correct_rate=1.0,
+            required_tool_pass_rate=1.0,
+            tool_sequence_valid_rate=1.0,
+            retrieval_mode_valid_rate=1.0,
+            content_pass_rate=1.0,
+            required_point_hit_rate_avg=1.0,
+            optional_point_hit_rate_avg=1.0,
+            report_generation_success_rate=1.0,
+        )
+        fake_judge_summary = JudgeBasedSummary(enabled=False)
+        fake_normal_summary = NormalSummary(
+            total_cases=1,
+            content_pass_rate=1.0,
+            tool_usage_valid_rate=1.0,
+            unexpected_tool_rate=0.0,
+            required_point_hit_rate_avg=1.0,
+            judge_pass_rate=None,
+        )
+        fake_report_summary = ReportSummary(
+            total_cases=0,
+            required_tools_present_rate=0.0,
+            tool_dependency_valid_rate=0.0,
+            time_consistency_valid_rate=0.0,
+            content_pass_rate=0.0,
+            avg_groundedness_score=None,
+            avg_report_quality_score=None,
+        )
+
+        with patch("smart_clean_agent.evaluation.run.load_eval_cases", return_value=[object()]):
+            with patch("smart_clean_agent.evaluation.run.AgentEvaluationExecutor") as mock_executor_cls:
+                mock_executor_cls.return_value = Mock()
+                with patch(
+                    "smart_clean_agent.evaluation.run.run_evaluation",
+                    return_value=([object()], fake_rule_summary, fake_judge_summary, fake_normal_summary, fake_report_summary),
+                ):
+                    with patch(
+                        "smart_clean_agent.evaluation.run.write_evaluation_outputs",
+                        return_value=(Path("a.json"), Path("a.csv")),
+                    ):
+                        result = run.main(argv=["--chat-model", "qwen-plus"])
+
+        self.assertEqual(result, 0)
+        mock_executor_cls.assert_called_once_with(
+            with_judge=False,
+            judge_model_name=None,
+            chat_model_name="qwen-plus",
+        )
 
     def test_main_returns_one_on_failure(self):
         with patch("smart_clean_agent.evaluation.run.load_eval_cases", side_effect=ValueError("bad dataset")):

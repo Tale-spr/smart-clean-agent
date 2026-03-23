@@ -9,6 +9,8 @@ class EvalCompareTestCase(unittest.TestCase):
             "generated_at": "before",
             "rule_based_summary": {"content_pass_rate": 0.5, "route_correct_rate": 1.0},
             "judge_based_summary": {"enabled": False},
+            "normal_summary": {"tool_usage_valid_rate": 0.5},
+            "report_summary": {"tool_dependency_valid_rate": 0.0},
             "results": [
                 {
                     "case_id": "case_001",
@@ -16,6 +18,9 @@ class EvalCompareTestCase(unittest.TestCase):
                         "route_correct": True,
                         "required_tools_present": True,
                         "tool_sequence_valid": True,
+                        "tool_usage_valid": True,
+                        "tool_dependency_valid": True,
+                        "time_consistency_valid": True,
                         "retrieval_mode_valid": True,
                         "required_point_hit_rate": 0.0,
                     },
@@ -27,6 +32,8 @@ class EvalCompareTestCase(unittest.TestCase):
             "generated_at": "after",
             "rule_based_summary": {"content_pass_rate": 1.0, "route_correct_rate": 1.0},
             "judge_based_summary": {"enabled": False},
+            "normal_summary": {"tool_usage_valid_rate": 1.0},
+            "report_summary": {"tool_dependency_valid_rate": 1.0},
             "results": [
                 {
                     "case_id": "case_001",
@@ -34,6 +41,9 @@ class EvalCompareTestCase(unittest.TestCase):
                         "route_correct": True,
                         "required_tools_present": True,
                         "tool_sequence_valid": True,
+                        "tool_usage_valid": True,
+                        "tool_dependency_valid": True,
+                        "time_consistency_valid": True,
                         "retrieval_mode_valid": True,
                         "required_point_hit_rate": 1.0,
                     },
@@ -45,6 +55,8 @@ class EvalCompareTestCase(unittest.TestCase):
         comparison = compare_results(before_payload, after_payload)
 
         self.assertEqual(comparison["rule_based_summary_diff"]["content_pass_rate"], 0.5)
+        self.assertEqual(comparison["normal_summary_diff"]["tool_usage_valid_rate"], 0.5)
+        self.assertEqual(comparison["report_summary_diff"]["tool_dependency_valid_rate"], 1.0)
         self.assertEqual(len(comparison["improved_cases"]), 1)
         self.assertEqual(comparison["improved_cases"][0]["case_id"], "case_001")
         self.assertEqual(comparison["regressed_cases"], [])

@@ -26,6 +26,8 @@ Thumbs.db
 # Runtime outputs
 logs/
 data/eval/results/
+data/memory/users/
+data/memory/reports/
 .tmp/
 
 # Local databases and generated stores

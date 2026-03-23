@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from typing import Any, NotRequired, TypedDict
 
 from langchain.agents import create_agent
@@ -37,6 +38,7 @@ DOMAIN_KEYWORDS = (
     "保养",
     "维护",
     "地板",
+    "木地板",
     "地毯",
     "瓷砖",
     "滚刷更换",
@@ -118,6 +120,7 @@ class ReactAgent:
         return "".join(self.execute_stream(query, runtime_context)).strip()
 
     def _execute_report_stream(self, query: str, runtime_context: AgentRuntimeContext):
+        self._prime_report_runtime(query, runtime_context)
         input_dict = {
             "messages": [
                 {"role": "user", "content": query},
@@ -171,6 +174,26 @@ class ReactAgent:
                 level="error",
             )
             raise
+
+    def _prime_report_runtime(self, query: str, runtime_context: AgentRuntimeContext) -> None:
+        runtime_context["report"] = True
+        runtime_context.setdefault("trace_tool_calls", [])
+        runtime_context.setdefault("report_tool_sequence", [])
+        runtime_context.setdefault("status_events", [])
+
+        # 显式补齐报告链路的前置主流程，避免首次模型调用仍停留在普通问答 prompt。
+        forced_tools = ("get_user_id", "get_current_month", "fill_context_for_report")
+        for tool_name in forced_tools:
+            runtime_context["trace_tool_calls"].append(tool_name)
+            runtime_context["report_tool_sequence"].append(tool_name)
+
+        runtime_context["report_current_month"] = self._extract_report_month(query) or datetime.now().strftime("%Y-%m")
+        record_status_event(
+            runtime_context,
+            event_type="stage.report",
+            title="正在生成使用报告",
+            detail="正在准备报告上下文与基础工具链路",
+        )
 
     def _build_normal_graph(self):
         graph = StateGraph(ReActGraphState)
@@ -595,10 +618,21 @@ class ReactAgent:
         for keyword in candidates:
             if keyword in query and keyword not in focus_terms:
                 focus_terms.append(keyword)
+        if "木地板" in query and any(token in query for token in ("拖地", "湿拖", "扫拖")) and "出水量" not in focus_terms:
+            focus_terms.append("出水量")
+        knowledge_info = known_facts.get("knowledge_info", "")
+        if "出水量" in knowledge_info and "出水量" not in focus_terms:
+            focus_terms.append("出水量")
         city = known_facts.get("city")
         if city and city not in focus_terms:
             focus_terms.append(city)
         return focus_terms[:6]
+
+    def _extract_report_month(self, query: str) -> str:
+        match = re.search(r"(20\d{2}-\d{2})", query)
+        if match:
+            return match.group(1)
+        return ""
 
     def _remove_gap(self, remaining_questions: list[str], gap_name: str) -> list[str]:
         return [item for item in remaining_questions if item != gap_name]
