@@ -1,43 +1,131 @@
 import unittest
-from types import SimpleNamespace
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 
 from smart_clean_agent.agent.react_agent import ReactAgent
 
 
-class FakeStreamingAgent:
-    def stream(self, input_dict, stream_mode, context):
-        yield {"messages": [HumanMessage(content="如何高效设置清洁计划")]}
-        yield {"messages": [AIMessage(content="可以按房间和时间段设置清洁计划。")]}
-        yield {"messages": [AIMessage(content="可以按房间和时间段设置清洁计划。建议工作日早晨清扫客厅。")]}
+class DummyModel:
+    def __init__(self, answer: str = "这是最终回答。"):
+        self.answer = answer
+        self.messages = None
+
+    def invoke(self, messages):
+        self.messages = messages
+        return AIMessage(content=self.answer)
+
+
+class DummyTool:
+    def __init__(self, name: str, result: str):
+        self.name = name
+        self.result = result
+        self.calls = []
+
+    def invoke(self, args):
+        self.calls.append(args)
+        return self.result
 
 
 class ReactAgentTestCase(unittest.TestCase):
-    def test_execute_stream_only_yields_assistant_delta(self):
+    def _build_agent(self, *, weather_result: str = "城市: 北京\n天气: 晴", rag_result: str = "建议定期更换滚刷。"):
         agent = ReactAgent.__new__(ReactAgent)
-        agent.agent = FakeStreamingAgent()
+        agent.chat_model = DummyModel()
+        weather_tool = DummyTool("get_weather", weather_result)
+        rag_tool = DummyTool("rag_summarize", rag_result)
+        agent.tools = [weather_tool, rag_tool]
+        agent.tool_map = {tool.name: tool for tool in agent.tools}
+        agent.report_agent = None
+        agent.agent = None
+        agent.normal_graph = agent._build_normal_graph()
+        return agent, weather_tool, rag_tool
 
-        result = "".join(
-            agent.execute_stream(
-                "如何高效设置清洁计划",
-                {
-                    "report": False,
-                    "user_id": "1001",
-                    "city": "北京",
-                    "session_id": "session_001",
-                    "session_summary": "",
-                    "recent_history": "",
-                    "user_memory_summary": "",
-                    "report_memory_summary": "",
-                },
-            )
-        )
+    def _build_runtime_context(self):
+        return {
+            "report": False,
+            "force_report_agent": False,
+            "user_id": "1001",
+            "city": "北京",
+            "session_id": "session_001",
+            "session_summary": "",
+            "recent_history": "",
+            "user_memory_summary": "",
+            "report_memory_summary": "",
+            "trace_tool_calls": [],
+            "react_trace": [],
+            "react_step_count": 0,
+            "react_stop_reason": "",
+            "status_events": [],
+        }
 
-        self.assertNotIn("如何高效设置清洁计划", result)
-        self.assertEqual(result, "可以按房间和时间段设置清洁计划。建议工作日早晨清扫客厅。")
+    def test_execute_weather_query_without_city_calls_location_then_weather(self):
+        agent, weather_tool, _ = self._build_agent()
+        runtime_context = self._build_runtime_context()
+
+        result = agent.execute("今天天气怎么样？", runtime_context)
+
+        self.assertEqual(result, "这是最终回答。")
+        self.assertEqual(runtime_context["trace_tool_calls"], ["get_user_location", "get_weather"])
+        self.assertEqual(weather_tool.calls[0], {"city": "北京"})
+        self.assertEqual(runtime_context["react_stop_reason"], "enough_information")
+        self.assertEqual(runtime_context["react_step_count"], 2)
+
+    def test_execute_weather_query_with_city_calls_weather_directly(self):
+        agent, weather_tool, rag_tool = self._build_agent()
+        runtime_context = self._build_runtime_context()
+
+        result = agent.execute("上海今天温度怎么样？", runtime_context)
+
+        self.assertEqual(result, "这是最终回答。")
+        self.assertEqual(runtime_context["trace_tool_calls"], ["get_weather"])
+        self.assertEqual(weather_tool.calls[0], {"city": "上海"})
+        self.assertEqual(rag_tool.calls, [])
+
+    def test_execute_environment_query_without_explicit_weather_keywords_uses_weather_chain(self):
+        agent, weather_tool, rag_tool = self._build_agent()
+        runtime_context = self._build_runtime_context()
+        runtime_context["city"] = "杭州"
+
+        result = agent.execute("现在我所在城市适不适合高频湿拖？", runtime_context)
+
+        self.assertEqual(result, "这是最终回答。")
+        self.assertEqual(runtime_context["trace_tool_calls"], ["get_user_location", "get_weather"])
+        self.assertEqual(weather_tool.calls[0], {"city": "杭州"})
+        self.assertEqual(rag_tool.calls, [])
+        self.assertEqual(runtime_context["react_stop_reason"], "enough_information")
+
+    def test_execute_weather_plus_maintenance_query_calls_weather_then_rag(self):
+        agent, weather_tool, rag_tool = self._build_agent()
+        runtime_context = self._build_runtime_context()
+
+        result = agent.execute("广州湿度高，扫拖一体机要怎么保养？", runtime_context)
+
+        self.assertEqual(result, "这是最终回答。")
+        self.assertEqual(runtime_context["trace_tool_calls"], ["get_weather", "rag_summarize"])
+        self.assertEqual(weather_tool.calls[0], {"city": "广州"})
+        self.assertEqual(rag_tool.calls[0], {"query": "广州湿度高 扫拖一体机要怎么保养"})
+
+    def test_execute_knowledge_query_calls_rag_only(self):
+        agent, _, rag_tool = self._build_agent()
+        runtime_context = self._build_runtime_context()
+
+        result = agent.execute("滚刷更换后需要注意什么？", runtime_context)
+
+        self.assertEqual(result, "这是最终回答。")
+        self.assertEqual(runtime_context["trace_tool_calls"], ["rag_summarize"])
+        self.assertEqual(rag_tool.calls[0], {"query": "滚刷更换后需要注意什么"})
+        self.assertEqual(runtime_context["react_stop_reason"], "enough_information")
+
+    def test_execute_report_query_uses_report_agent_path(self):
+        agent, _, _ = self._build_agent()
+        runtime_context = self._build_runtime_context()
+        runtime_context["force_report_agent"] = True
+
+        agent._execute_report_stream = lambda query, context: iter(["报告内容"])
+
+        result = agent.execute("生成我的本月使用报告", runtime_context)
+
+        self.assertEqual(result, "报告内容")
 
 
 if __name__ == "__main__":
     unittest.main()
-

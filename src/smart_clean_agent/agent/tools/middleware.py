@@ -11,6 +11,40 @@ from smart_clean_agent.services.status_event_service import record_status_event
 from smart_clean_agent.utils.logger_handler import logger
 from smart_clean_agent.utils.prompt_loader import load_report_prompts, load_system_prompts
 
+REPORT_TOOL_SEQUENCE = (
+    "get_user_id",
+    "get_current_month",
+    "fill_context_for_report",
+    "fetch_external_data",
+    "fetch_external_history",
+)
+
+
+def _record_report_tool_sequence(context: dict, tool_name: str) -> None:
+    if tool_name not in REPORT_TOOL_SEQUENCE:
+        return
+
+    sequence = context.setdefault("report_tool_sequence", [])
+    if not isinstance(sequence, list):
+        sequence = []
+        context["report_tool_sequence"] = sequence
+
+    required_predecessors: dict[str, tuple[str, ...]] = {
+        "fill_context_for_report": ("get_user_id", "get_current_month"),
+        "fetch_external_data": ("fill_context_for_report",),
+        "fetch_external_history": ("fill_context_for_report",),
+    }
+    missing = [item for item in required_predecessors.get(tool_name, ()) if item not in sequence]
+    if missing:
+        context["report_sequence_violation"] = True
+        logger.warning(
+            "[报告工具顺序]工具%s在缺少前置步骤%s时被调用",
+            tool_name,
+            ",".join(missing),
+        )
+
+    sequence.append(tool_name)
+
 
 @wrap_tool_call
 def monitor_tool(  # 工具执行的监控
@@ -24,6 +58,9 @@ def monitor_tool(  # 工具执行的监控
     trace_tool_calls = request.runtime.context.get("trace_tool_calls")
     if isinstance(trace_tool_calls, list):
         trace_tool_calls.append(tool_name)
+
+    if request.runtime.context.get("force_report_agent") or request.runtime.context.get("report"):
+        _record_report_tool_sequence(request.runtime.context, tool_name)
 
     if tool_name == "rag_summarize":
         record_status_event(

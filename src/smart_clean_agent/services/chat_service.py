@@ -57,6 +57,7 @@ def run_report(
         response_key="report",
         agent=agent,
         status_event_callback=status_event_callback,
+        force_report_agent=True,
     )
 
 
@@ -67,6 +68,7 @@ def _run_agent_interaction(
     response_key: str,
     agent: ReactAgent | None,
     status_event_callback: Callable[[dict[str, str]], Any] | None,
+    force_report_agent: bool = False,
 ) -> dict[str, Any]:
     normalized_user_id = (user_id or "").strip()
     normalized_query = (query or "").strip()
@@ -106,6 +108,7 @@ def _run_agent_interaction(
         session_data=session_data,
         status_events=status_events,
         status_event_callback=callback,
+        force_report_agent=force_report_agent,
     )
 
     runtime_agent = agent or get_chat_agent()
@@ -146,6 +149,7 @@ def _build_runtime_context(
     session_data: dict[str, Any],
     status_events: list[dict[str, str]],
     status_event_callback: Callable[[dict[str, str]], Any] | None,
+    force_report_agent: bool,
 ) -> AgentRuntimeContext:
     messages = session_data.get("messages", [])
     user_id = profile["user_id"]
@@ -170,6 +174,8 @@ def _build_runtime_context(
 
     runtime_context: AgentRuntimeContext = {
         "report": False,
+        "force_report_agent": force_report_agent,
+        "execution_mode": "",
         "user_id": user_id,
         "city": profile["city"],
         "session_id": session_data["session_id"],
@@ -177,6 +183,12 @@ def _build_runtime_context(
         "recent_history": build_recent_history(messages),
         "user_memory_summary": user_memory_summary,
         "report_memory_summary": report_memory_summary,
+        "trace_tool_calls": [],
+        "react_trace": [],
+        "react_step_count": 0,
+        "react_stop_reason": "",
+        "report_tool_sequence": [],
+        "report_sequence_violation": False,
         "status_events": status_events,
     }
     if status_event_callback is not None:

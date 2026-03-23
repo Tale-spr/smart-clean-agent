@@ -15,8 +15,11 @@ class BaseModelFactory(ABC):
 
 
 class ChatModelFactory(BaseModelFactory):
+    def __init__(self, model_name: str | None = None):
+        self.model_name = model_name
+
     def generator(self) -> Optional[Embeddings | BaseChatModel]:
-        return ChatTongyi(model=rag_conf["chat_model_name"])
+        return ChatTongyi(model=self.model_name or rag_conf["chat_model_name"])
 
 
 class EmbeddingFactory(BaseModelFactory):
@@ -25,8 +28,8 @@ class EmbeddingFactory(BaseModelFactory):
 
 
 
-def create_chat_model() -> BaseChatModel:
-    model = ChatModelFactory().generator()
+def create_chat_model(model_name: str | None = None) -> BaseChatModel:
+    model = ChatModelFactory(model_name=model_name).generator()
     if model is None:
         raise ValueError("聊天模型初始化失败")
     return model

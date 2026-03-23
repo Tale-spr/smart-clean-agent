@@ -12,8 +12,6 @@
 
 ## 效果截图
 
-
-
 ![聊天演示截图占位](docs/images/chat-home.png)
 ![报告生成截图占位](docs/images/report-demo.png)
 ![API 健康检查截图占位](docs/images/api-health.png)
@@ -158,14 +156,37 @@ docker run -p 8000:8000 --env-file .env agent-service
 python src/smart_clean_agent/evaluation/run.py
 ```
 
-当前评测指标：
+启用 Judge：
 
-- `answer_keyword_hit_rate`
-- `tool_call_success_rate`
-- `retrieval_hit_rate`
-- `report_generation_success_rate`
+```powershell
+python src/smart_clean_agent/evaluation/run.py --with-judge
+```
+
+当前评测默认使用 `data/eval/eval_cases.jsonl`，并输出三层结构：
+
+- `rule_based_summary`
+- `judge_based_summary`
+- `results`
+
+其中规则层重点关注：
+
+- 路由是否正确
+- 必需工具是否完整
+- 工具顺序是否合理
+- required points 是否覆盖
+- 报告类请求是否完整走通
+
+Judge 层默认关闭，只用于离线语义评分，不进入线上主链路。
 
 评测结果默认输出到 `data/eval/results/`。
+
+对比两个评测结果：
+
+```powershell
+python src/smart_clean_agent/evaluation/compare.py `
+  data/eval/results/old.json `
+  data/eval/results/new.json
+```
 
 ## 当前能力
 

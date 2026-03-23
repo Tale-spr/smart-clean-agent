@@ -138,6 +138,7 @@ def build_runtime_context(
     session_state: MutableMapping[str, Any],
     status_events: list[dict[str, str]] | None = None,
     status_event_callback: Callable[[dict[str, str]], Any] | None = None,
+    force_report_agent: bool = False,
 ) -> AgentRuntimeContext:
     user_id = session_state["selected_user_id"]
     messages = session_state.get("message", [])
@@ -163,6 +164,8 @@ def build_runtime_context(
 
     runtime_context: AgentRuntimeContext = {
         "report": False,
+        "force_report_agent": force_report_agent,
+        "execution_mode": "",
         "user_id": user_id,
         "city": session_state["selected_city"],
         "session_id": session_state.get("current_session_id", ""),
@@ -170,6 +173,12 @@ def build_runtime_context(
         "recent_history": build_recent_history(messages),
         "user_memory_summary": user_memory_summary,
         "report_memory_summary": report_memory_summary,
+        "trace_tool_calls": [],
+        "react_trace": [],
+        "react_step_count": 0,
+        "react_stop_reason": "",
+        "report_tool_sequence": [],
+        "report_sequence_violation": False,
     }
     if status_events is not None:
         runtime_context["status_events"] = status_events
