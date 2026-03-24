@@ -1,7 +1,7 @@
 import csv
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
@@ -69,9 +69,10 @@ class EvalCase:
 
 @dataclass
 class EvalTrace:
-    tool_calls: list[str]
-    retrieved_docs: list[dict[str, str]]
-    retrieval_hit: bool
+    tool_calls: list[str] = field(default_factory=list)
+    retrieved_docs: list[dict[str, str]] = field(default_factory=list)
+    tool_evidence: list[dict[str, str]] = field(default_factory=list)
+    retrieval_hit: bool = False
     step_count: int = 0
     stop_reason: str = ""
     tool_sequence_valid: bool = True
@@ -332,15 +333,18 @@ def validate_report_tool_dependency(tool_calls: list[str], required_tools: list[
 def build_eval_trace(
     tool_calls: list[str] | None = None,
     retrieved_docs: list[dict[str, str]] | None = None,
+    tool_evidence: list[dict[str, str]] | None = None,
     step_count: int = 0,
     stop_reason: str = "",
     execution_mode: str = "normal",
 ) -> EvalTrace:
     safe_tool_calls = list(tool_calls or [])
     safe_retrieved_docs = list(retrieved_docs or [])
+    safe_tool_evidence = list(tool_evidence or [])
     return EvalTrace(
         tool_calls=safe_tool_calls,
         retrieved_docs=safe_retrieved_docs,
+        tool_evidence=safe_tool_evidence,
         retrieval_hit=bool(safe_retrieved_docs),
         step_count=step_count,
         stop_reason=stop_reason,
@@ -411,7 +415,7 @@ def _time_consistency_valid(case: EvalCase, answer: str) -> bool:
     if not target_month:
         return True
 
-    mentioned_months = _extract_year_months(answer)
+    mentioned_months = _extract_year_months(_extract_report_analysis_scope(answer))
     if not mentioned_months:
         return False
     if target_month not in mentioned_months:
@@ -423,6 +427,22 @@ def _time_consistency_valid(case: EvalCase, answer: str) -> bool:
         return all(month in allowed for month in mentioned_months)
 
     return all(month <= target_month for month in mentioned_months)
+
+
+def _extract_report_analysis_scope(answer: str) -> str:
+    normalized = answer or ""
+    lines = normalized.splitlines(keepends=True)
+    keywords = ("建议", "提升方向", "长期使用", "保养与使用")
+    offset = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if index == 0:
+            offset += len(line)
+            continue
+        if stripped.startswith("#") and any(keyword in stripped for keyword in keywords):
+            return normalized[:offset]
+        offset += len(line)
+    return normalized
 
 
 def _build_rule_based_result(case: EvalCase, trace: EvalTrace, answer: str) -> RuleBasedResult:

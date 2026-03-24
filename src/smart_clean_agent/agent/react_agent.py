@@ -26,7 +26,7 @@ IMPLICIT_LOCATION_KEYWORDS = ("我所在城市", "当前城市", "现在这里",
 ENVIRONMENT_DECISION_KEYWORDS = ("适不适合", "适合", "能不能", "要不要", "会不会影响", "有什么影响")
 WEATHER_KNOWLEDGE_KEYWORDS = ("保养", "存放", "耗材", "回充", "导航", "地图", "避障", "滤网", "滚刷", "拖布", "出水量", "水箱", "故障")
 CITY_PATTERN = re.compile(r"(?P<city>[\u4e00-\u9fa5]{2,6})(?:今天|现在|当前|这几天)?(?:的)?(?:天气|温度|湿度|空气|下雨|降雨)")
-NON_CITY_TOKENS = {"今天", "今日", "现在", "当前", "这几天", "最近"}
+NON_CITY_TOKENS = {"今天", "今日", "现在", "当前", "这几天", "最近", "在的城市", "所在的城市", "我所在的城市"}
 YEAR_MONTH_PATTERN = re.compile(r"(?P<year>\d{4})\s*(?:年|/|-)\s*(?P<month>\d{1,2})\s*月?")
 
 
@@ -127,6 +127,7 @@ class ReactAgent:
         runtime_context["execution_mode"] = "normal"
         runtime_context.setdefault("trace_tool_calls", [])
         runtime_context.setdefault("react_trace", [])
+        runtime_context.setdefault("tool_evidence", [])
         initial_state: ReActGraphState = {"query": query, "runtime_context": runtime_context, "intent": "", "known_facts": {}, "tool_history": [], "observations": [], "remaining_questions": [], "final_answer": "", "step_count": 0, "stop_reason": ""}
         try:
             final_state = self.normal_graph.invoke(initial_state)
@@ -144,6 +145,7 @@ class ReactAgent:
         runtime_context["report"] = True
         runtime_context.setdefault("trace_tool_calls", [])
         runtime_context.setdefault("react_trace", [])
+        runtime_context.setdefault("tool_evidence", [])
         runtime_context.setdefault("report_tool_sequence", [])
         runtime_context.setdefault("status_events", [])
         initial_state: ReportGraphState = {"query": query, "runtime_context": runtime_context, "report_target_month": "", "user_id": "", "needs_history": False, "needs_domain_knowledge": False, "known_facts": {}, "tool_history": [], "observations": [], "missing_inputs": [], "final_report": "", "step_count": 0, "stop_reason": ""}
@@ -170,6 +172,10 @@ class ReactAgent:
         explicit_city = self._extract_city(query)
         if explicit_city:
             known_facts["city"] = explicit_city
+        weather_premise = self._extract_weather_premise(query)
+        if weather_premise:
+            known_facts["user_weather_premise"] = weather_premise["text"]
+            known_facts["weather_premise_type"] = weather_premise["type"]
 
         if direct_reply and not weather_needed and not knowledge_needed:
             intent = "direct"
@@ -247,6 +253,12 @@ class ReactAgent:
         try:
             result = self._invoke_tool(tool_name, tool_args, runtime_context)
             tool_history[-1]["status"] = "success"
+            runtime_context.setdefault("tool_evidence", []).append(
+                {
+                    "tool_name": tool_name,
+                    "summary": self._summarize_tool_result(tool_name, result),
+                }
+            )
             record_status_event(runtime_context, event_type="tool.success", title="工具调用完成", detail=f"{tool_name} 调用成功")
             return {"tool_history": tool_history, "last_tool_result": result, "last_tool_error": "", "step_count": state.get("step_count", 0) + 1}
         except Exception as exc:
@@ -283,6 +295,8 @@ class ReactAgent:
             if self._is_unusable_tool_result(tool_result):
                 return {"observations": observations, "stop_reason": "tool_failed"}
             known_facts["weather_info"] = tool_result
+            if known_facts.get("weather_premise_type"):
+                known_facts["weather_conflict"] = "true" if self._weather_conflicts_user_premise(known_facts["weather_premise_type"], tool_result) else "false"
             remaining_questions = self._remove_gap(remaining_questions, "weather")
         elif tool_name == "rag_summarize":
             if self._is_unusable_tool_result(tool_result):
@@ -304,6 +318,8 @@ class ReactAgent:
             answer = "我不知道"
         elif stop_reason in {"tool_failed", "max_steps_reached"} and not known_facts:
             answer = "我不知道"
+        elif self._should_use_guarded_environment_answer(state):
+            answer = self._build_guarded_environment_answer(state)
         else:
             answer = self._build_final_answer(state)
 
@@ -414,6 +430,12 @@ class ReactAgent:
         try:
             result = self._invoke_tool(tool_name, tool_args, runtime_context)
             tool_history[-1]["status"] = "success"
+            runtime_context.setdefault("tool_evidence", []).append(
+                {
+                    "tool_name": tool_name,
+                    "summary": self._summarize_tool_result(tool_name, result),
+                }
+            )
             record_status_event(runtime_context, event_type="tool.success", title="工具调用完成", detail=f"{tool_name} 调用成功")
             return {"tool_history": tool_history, "last_tool_result": result, "last_tool_error": "", "step_count": state.get("step_count", 0) + 1}
         except Exception as exc:
@@ -455,7 +477,11 @@ class ReactAgent:
             missing_inputs = self._remove_gap(missing_inputs, "month")
         elif tool_name == "fetch_external_data":
             if self._is_unusable_tool_result(tool_result):
-                return {"observations": observations, "stop_reason": "tool_failed"}
+                known_facts["monthly_record_unavailable"] = "true"
+                known_facts["monthly_record"] = ""
+                missing_inputs = self._remove_gap(missing_inputs, "monthly_record")
+                return {"known_facts": known_facts, "missing_inputs": missing_inputs, "observations": observations, "last_tool_result": "", "last_tool_error": ""}
+            known_facts["monthly_record_unavailable"] = "false"
             known_facts["monthly_record"] = tool_result
             missing_inputs = self._remove_gap(missing_inputs, "monthly_record")
         elif tool_name == "fetch_external_history":
@@ -476,6 +502,8 @@ class ReactAgent:
         monthly_record = (known_facts.get("monthly_record") or "").strip()
         if stop_reason in {"tool_failed", "max_steps_reached", "unsupported_request"} and not monthly_record:
             report = "暂时无法生成可靠的使用报告，请稍后重试。"
+        elif known_facts.get("monthly_record_unavailable") == "true" or not monthly_record:
+            report = self._build_limited_report(state)
         else:
             report = self._build_final_report(state)
 
@@ -505,6 +533,8 @@ class ReactAgent:
             evidence_sections.append(f"用户城市: {known_facts['city']}")
         if known_facts.get("weather_info"):
             evidence_sections.append(f"天气信息:\n{known_facts['weather_info']}")
+        if known_facts.get("user_weather_premise"):
+            evidence_sections.append(f"用户明确前提:\n{known_facts['user_weather_premise']}")
         if known_facts.get("knowledge_info"):
             evidence_sections.append(f"知识库信息:\n{known_facts['knowledge_info']}")
         if observations:
@@ -521,6 +551,10 @@ class ReactAgent:
             human_sections.append("当前没有可用的外部信息，请仅在你有把握时回答，否则回复“我不知道”。")
         if focus_terms:
             human_sections.append(f"回答时请自然保留这些关键术语：{', '.join(focus_terms)}。")
+        if known_facts.get("weather_conflict") == "true":
+            human_sections.append("天气工具返回与用户明确描述存在差异。不要直接否定用户前提，请说明信息差异，并按更保守的场景给建议。")
+        if known_facts.get("weather_premise_type") in {"humid", "rain"} and "出水量" in query:
+            human_sections.append("对于潮湿或雨天与出水量调整相关的问题，如果知识库没有明确支持，不要输出“无需降低出水量”这类强结论，应优先给出保守建议。")
         human_sections.append("要求：使用“结论 + 依据 + 建议”的最小完整结构；回答保持简洁，但不要遗漏用户问题中的关键部件名、场景名、天气要素或建议动作。")
         human_sections.append("只输出最终回答；不要暴露内部推理、步骤、工具名或中间分析。")
         return self._invoke_model(load_system_prompts(), human_sections)
@@ -545,9 +579,42 @@ class ReactAgent:
             human_sections.append(f"专业建议参考:\n{known_facts['knowledge_info']}")
         if observations:
             human_sections.append("观察摘要:\n" + "\n".join(f"- {item['tool_name']}: {item['summary']}" for item in observations))
-        human_sections.append("要求：先给出该月主结论；只有在明确拿到趋势信息时，才补充最近多月变化和长期建议；不要编造具体数值、月份或趋势；如果某部分信息不足，请明确说明信息范围有限。")
+        human_sections.append("要求：先给出该月主结论；只有在明确拿到趋势信息时，才补充最近多月变化和长期建议；只能引用“本月记录”和“趋势信息”中已明确出现的具体数值、次数、比例、寿命天数；如果某部分信息不足，请明确说明信息范围有限，不要自行补齐具体数字。")
         human_sections.append("只输出最终报告，不要展示内部推理、工具名或中间分析。")
         return self._invoke_model(load_report_prompts(), human_sections)
+
+    def _build_limited_report(self, state: ReportGraphState) -> str:
+        known_facts = state.get("known_facts", {})
+        target_month = known_facts.get("report_target_month") or "目标月份"
+        knowledge_info = (known_facts.get("knowledge_info") or "").strip()
+        history_info = (known_facts.get("history_info") or "").strip()
+        lines = [
+            "# 扫地机器人使用情况报告与保养建议",
+            "",
+            f"## 本月主结论（{target_month}）",
+            "",
+            "当前未获取到足够完整的本月使用记录，因此无法可靠给出覆盖率、次数、寿命天数等具体量化结论。",
+            "",
+            "## 信息范围说明",
+            "",
+            "本报告仅能基于已有上下文和通用维护知识给出保守建议，建议后续补充当月外部记录后再生成完整版月报。",
+        ]
+        if history_info:
+            lines.extend(["", "## 已有趋势信息", "", history_info])
+        if knowledge_info:
+            lines.extend(["", "## 保守建议", "", knowledge_info])
+        else:
+            lines.extend(
+                [
+                    "",
+                    "## 保守建议",
+                    "",
+                    "1. 先检查主刷、边刷、滤网和拖布是否存在明显缠绕、堵塞或磨损。",
+                    "2. 如近期有湿拖任务，优先从低档或中低档出水量开始，观察地面残留情况再调整。",
+                    "3. 若后续补齐当月记录，可重新生成更完整的使用报告与耗材建议。",
+                ]
+            )
+        return "\n".join(lines).strip()
 
     def _invoke_model(self, system_prompt: str, human_sections: list[str]) -> str:
         response = self.chat_model.invoke([SystemMessage(content=system_prompt), HumanMessage(content="\n\n".join(section for section in human_sections if section))])
@@ -612,7 +679,9 @@ class ReactAgent:
             if candidate.endswith(token):
                 candidate = candidate[:-len(token)]
                 break
-        return "" if candidate in NON_CITY_TOKENS else candidate
+        if candidate in NON_CITY_TOKENS or "城市" in candidate:
+            return ""
+        return candidate
 
     def _build_rag_query(self, query: str) -> str:
         cleaned = re.sub(r"[？?！!。,.，]", " ", query.strip())
@@ -640,12 +709,72 @@ class ReactAgent:
     def _extract_report_month(self, query: str) -> str:
         return self._normalize_report_month(query)
 
+    def _extract_weather_premise(self, query: str) -> dict[str, str] | None:
+        normalized = query.strip()
+        if any(token in normalized for token in ("最近下雨", "下雨", "雨天", "降雨")):
+            return {"type": "rain", "text": "用户明确提到最近下雨或处于雨天场景"}
+        if any(token in normalized for token in ("潮湿", "湿度高", "回南天", "梅雨", "梅雨天")):
+            return {"type": "humid", "text": "用户明确提到当前环境潮湿或湿度较高"}
+        if any(token in normalized for token in ("干燥", "湿度低", "空气干燥")):
+            return {"type": "dry", "text": "用户明确提到当前环境干燥或湿度较低"}
+        return None
+
     def _normalize_report_month(self, value: str) -> str:
         match = YEAR_MONTH_PATTERN.search(value or "")
         if match:
             return f"{match.group('year')}-{int(match.group('month')):02d}"
         stripped = (value or "").strip()
         return stripped if re.fullmatch(r"20\d{2}-\d{2}", stripped) else ""
+
+    def _weather_conflicts_user_premise(self, premise_type: str, weather_info: str) -> bool:
+        normalized = (weather_info or "").strip()
+        humidity_match = re.search(r"湿度[:：]\s*(\d{1,3})", normalized)
+        humidity = int(humidity_match.group(1)) if humidity_match else None
+        if premise_type == "rain":
+            return not any(token in normalized for token in ("雨", "降雨"))
+        if premise_type == "humid":
+            return humidity is not None and humidity < 60
+        if premise_type == "dry":
+            return humidity is not None and humidity > 65
+        return False
+
+    def _should_use_guarded_environment_answer(self, state: ReActGraphState) -> bool:
+        query = state["query"]
+        known_facts = state.get("known_facts", {})
+        premise_type = known_facts.get("weather_premise_type")
+        if premise_type in {"humid", "rain"} and "出水量" in query:
+            return True
+        if premise_type == "rain" and any(token in query for token in ("注意", "建议", "注意事项")):
+            return True
+        return False
+
+    def _build_guarded_environment_answer(self, state: ReActGraphState) -> str:
+        query = state["query"]
+        known_facts = state.get("known_facts", {})
+        premise_type = known_facts.get("weather_premise_type", "")
+        weather_info = (known_facts.get("weather_info") or "").strip()
+        weather_conflict = known_facts.get("weather_conflict") == "true"
+
+        basis_parts: list[str] = []
+        if known_facts.get("user_weather_premise"):
+            basis_parts.append(known_facts["user_weather_premise"])
+        if weather_info:
+            basis_parts.append(f"工具天气信息：{weather_info.replace(chr(10), '；')}")
+        if weather_conflict:
+            basis_parts.append("天气工具返回与用户描述存在差异，因此以下建议按更保守场景给出。")
+
+        if "出水量" in query and premise_type in {"humid", "rain"}:
+            return (
+                "结论：在潮湿或下雨环境下，建议先使用低档或中低档出水量，再根据地面残留和水痕情况微调。\n"
+                f"依据：{'；'.join(basis_parts) if basis_parts else '当前问题属于潮湿环境下的湿拖参数调整场景。'}\n"
+                "建议：优先避免高档出水量；若地面已经偏湿、通风较差或容易留下水痕，应进一步降低出水量，并在清洁后及时擦干机身底部和拖布。"
+            )
+
+        return (
+            "结论：雨天或地面易潮湿时，机器人清洁可以继续，但要更注意防滑、防潮和传感器误判风险。\n"
+            f"依据：{'；'.join(basis_parts) if basis_parts else '当前问题属于雨天清洁注意事项场景。'}\n"
+            "建议：先清理积水或明显潮湿区域，避免机器人驶入湿滑地面；检查传感器与底盘是否受潮，清洁完成后及时擦干机身和拖布，并留意回充区域是否因潮湿导致识别异常。"
+        )
 
     def _remove_gap(self, remaining_questions: list[str], gap_name: str) -> list[str]:
         return [item for item in remaining_questions if item != gap_name]
@@ -656,6 +785,7 @@ class ReactAgent:
         return not normalized or any(marker in normalized for marker in unusable_markers)
 
     def _is_report_time_consistent(self, report: str, target_month: str) -> bool:
+        report = self._extract_report_analysis_scope(report)
         mentioned_months: list[str] = []
         seen: set[str] = set()
         for match in YEAR_MONTH_PATTERN.finditer(report or ""):
@@ -666,6 +796,21 @@ class ReactAgent:
         if not mentioned_months or target_month not in mentioned_months:
             return False
         return all(month <= target_month for month in mentioned_months)
+
+    def _extract_report_analysis_scope(self, report: str) -> str:
+        normalized = report or ""
+        lines = normalized.splitlines(keepends=True)
+        keywords = ("建议", "提升方向", "长期使用", "保养与使用")
+        offset = 0
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if index == 0:
+                offset += len(line)
+                continue
+            if stripped.startswith("#") and any(keyword in stripped for keyword in keywords):
+                return normalized[:offset]
+            offset += len(line)
+        return normalized
 
     def _summarize_tool_result(self, tool_name: str, result: str) -> str:
         normalized = (result or "").strip().replace("\n", " ")

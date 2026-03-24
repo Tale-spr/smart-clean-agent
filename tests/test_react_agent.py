@@ -173,6 +173,35 @@ class ReactAgentTestCase(unittest.TestCase):
         self.assertEqual(external_data_tool.calls[0], {"user_id": "1001", "month": "2025-06"})
         self.assertEqual(history_tool.calls[0], {"user_id": "1001", "months": 3})
 
+    def test_execute_environment_query_with_rain_premise_returns_guarded_answer(self):
+        agent, weather_tool, _, _, _, _, _ = self._build_agent(
+            weather_result="城市: 深圳\n天气: 多云\n温度: 7\n湿度: 26"
+        )
+        runtime_context = self._build_runtime_context()
+        runtime_context["city"] = "深圳"
+
+        result = agent.execute("我所在的城市最近下雨，机器人清洁要注意什么？", runtime_context)
+
+        self.assertIn("防滑", result)
+        self.assertIn("防潮", result)
+        self.assertEqual(runtime_context["trace_tool_calls"], ["get_user_location", "get_weather"])
+        self.assertEqual(weather_tool.calls[0], {"city": "深圳"})
+
+    def test_execute_report_query_without_monthly_record_returns_limited_report(self):
+        agent, _, _, get_current_month_tool, _, external_data_tool, _ = self._build_agent(
+            answer="这段回答不应被直接使用。",
+            external_data_result="",
+        )
+        runtime_context = self._build_runtime_context()
+        runtime_context["force_report_agent"] = True
+
+        result = agent.execute("生成我的本月使用报告", runtime_context)
+
+        self.assertIn("未获取到足够完整的本月使用记录", result)
+        self.assertEqual(runtime_context["trace_tool_calls"], ["get_current_month", "fetch_external_data"])
+        self.assertEqual(get_current_month_tool.calls, [{}])
+        self.assertEqual(external_data_tool.calls[0]["month"], "2026-03")
+
 
 if __name__ == "__main__":
     unittest.main()

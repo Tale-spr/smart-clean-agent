@@ -422,6 +422,88 @@ class EvalServiceTestCase(unittest.TestCase):
         self.assertFalse(result.rule_based.time_consistency_valid)
         self.assertTrue(result.rule_based.tool_dependency_valid)
 
+    def test_report_case_allows_next_month_only_in_suggestion_section(self):
+        case = EvalCase(
+            case_id="report_010",
+            query="请生成我2025-06的报告",
+            category="report_generation",
+            expected_route="report",
+            required_tools=["fetch_external_data"],
+            optional_tools=["get_user_id", "get_current_month", "fetch_external_history", "rag_summarize"],
+            required_points=[EvalPoint("rp_01", "报告", ["报告"])],
+            optional_points=[],
+            expected_retrieval_mode="optional",
+            target_month="2025-06",
+        )
+
+        result = evaluate_case(
+            case,
+            lambda _: (
+                "# 扫地机器人使用情况报告与保养建议\n\n## 本月主结论（2025年6月）\n\n这是2025年6月报告。\n\n## 建议\n\n建议在2025年7月底前完成滤网更换。",
+                build_eval_trace(
+                    ["fetch_external_data"],
+                    [],
+                    execution_mode="report",
+                ),
+            ),
+        )
+
+        self.assertTrue(result.rule_based.time_consistency_valid)
+
+    def test_point_alias_supports_faq_004_glue_brush_expression(self):
+        case = EvalCase(
+            case_id="faq_004",
+            query="带宠物的家庭选购机器人应该关注哪些能力？",
+            category="faq",
+            expected_route="normal",
+            required_tools=[],
+            optional_tools=["rag_summarize"],
+            required_points=[
+                EvalPoint("rp_01", "宠物", ["宠物"]),
+                EvalPoint("rp_02", "防缠绕", ["防缠绕", "胶刷", "胶刷设计", "防毛发缠绕"]),
+            ],
+            optional_points=[],
+            expected_retrieval_mode="required",
+            allow_no_tool=True,
+        )
+
+        result = evaluate_case(
+            case,
+            lambda _: (
+                "宠物家庭建议优先选大吸力和胶刷设计的机型。",
+                build_eval_trace(["rag_summarize"], [{"source": "doc.txt", "snippet": "宠物家庭建议"}], execution_mode="normal"),
+            ),
+        )
+
+        self.assertTrue(result.rule_based.content_pass)
+
+    def test_point_alias_supports_faq_005_cleaning_expression(self):
+        case = EvalCase(
+            case_id="faq_005",
+            query="扫地机器人多久清理一次滤网比较合适？",
+            category="faq",
+            expected_route="normal",
+            required_tools=[],
+            optional_tools=["rag_summarize"],
+            required_points=[
+                EvalPoint("rp_01", "滤网", ["滤网"]),
+                EvalPoint("rp_02", "清理", ["清理", "清洗", "清洁", "检查并清洗"]),
+            ],
+            optional_points=[],
+            expected_retrieval_mode="required",
+            allow_no_tool=True,
+        )
+
+        result = evaluate_case(
+            case,
+            lambda _: (
+                "建议每月检查并清洗滤网，3-6个月后更换。",
+                build_eval_trace(["rag_summarize"], [{"source": "doc.txt", "snippet": "滤网清洗"}], execution_mode="normal"),
+            ),
+        )
+
+        self.assertTrue(result.rule_based.content_pass)
+
     def test_write_evaluation_outputs_creates_new_json_shape(self):
         result = evaluate_case(
             EvalCase(

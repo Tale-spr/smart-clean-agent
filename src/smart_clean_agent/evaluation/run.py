@@ -47,6 +47,7 @@ def build_eval_runtime_context(case: EvalCase) -> dict:
         "react_stop_reason": "",
         "report_tool_sequence": [],
         "report_sequence_violation": False,
+        "tool_evidence": [],
     }
 
 
@@ -99,6 +100,7 @@ class AgentEvaluationExecutor:
         trace = build_eval_trace(
             tool_calls=runtime_context.get("trace_tool_calls", []),
             retrieved_docs=retrieved_docs_trace,
+            tool_evidence=runtime_context.get("tool_evidence", []),
             step_count=runtime_context.get("react_step_count", 0),
             stop_reason=runtime_context.get("react_stop_reason", ""),
             execution_mode=runtime_context.get("execution_mode", "") or case.expected_route,

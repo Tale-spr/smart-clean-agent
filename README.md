@@ -1,15 +1,27 @@
 # 智扫通 Agent 项目
 
-一个围绕“扫地机器人智能客服 + 使用报告生成”场景构建的 Agent 项目。项目同时提供 `Streamlit` 演示界面、`FastAPI` 服务接口、RAG 检索、用户记忆、离线评测和 Docker 部署入口。
+一个面向扫地机器人客服问答与使用报告生成场景的 Agent 项目。项目提供 `Streamlit` 演示界面、`FastAPI` 服务接口、RAG 检索、用户记忆、离线评测和 Docker 部署入口。
 
-## 项目亮点
+## 核心能力
 
-- 支持普通问答、天气查询、知识检索、报告生成、多轮上下文记忆
-- 普通问答采用显式 LangGraph ReAct 工作流，支持“分析问题 -> 调工具 -> 观察结果 -> 生成回答”
-- 报告生成使用独立链路，强调用户上下文、外部数据、趋势分析和时间一致性
-- 提供用户长期记忆和多月趋势记忆，支持更连续的个性化建议
-- 提供离线评测能力，支持规则评测、要点评测和可选 Judge 评分
-- `Streamlit` 与 `FastAPI` 共享同一业务服务层，便于演示和服务化部署
+- 普通问答、故障排查、环境适配建议
+- 月度使用报告与趋势分析
+- 天气工具调用与本地知识库检索
+- 多轮会话、用户长期记忆、报告记忆
+- `Streamlit` 演示入口与 `FastAPI` 标准接口
+- 离线评测、结果对比与可选 Judge 评分
+
+## 系统结构
+
+项目当前包含两条核心业务链路：
+
+- 普通问答链路  
+  使用显式 LangGraph ReAct 工作流，围绕“分析问题 -> 调工具 -> 观察结果 -> 生成回答”组织执行。
+
+- 报告生成链路  
+  使用独立的显式报告工作流，强调用户身份、月份、外部记录、趋势信息、知识补充和时间一致性。
+
+两条链路共享同一套服务层、会话存储、用户记忆和评测体系。
 
 ## 效果截图
 
@@ -38,7 +50,7 @@
 ├─prompts/                        # 提示词模板
 ├─src/
 │  └─smart_clean_agent/
-│     ├─agent/                    # Agent、tools、middleware
+│     ├─agent/                    # Agent、tools、middleware、显式工作流
 │     ├─api/                      # FastAPI 入口与 schema
 │     ├─evaluation/               # 离线评测
 │     ├─model/                    # 模型工厂
@@ -56,7 +68,7 @@
 
 ## 模型配置
 
-默认模型角色配置在 [rag.yml](config/rag.yml)：
+默认模型角色配置在 [rag.yml](e:/Python/Agent项目/config/rag.yml)：
 
 - 在线主链路：`qwen-plus`
 - RAG 总结：`qwen-plus`
@@ -64,7 +76,7 @@
 - Judge：`qwen-plus`
 - Embedding：`text-embedding-v4`
 
-当前实现只支持按角色切换模型名，不包含 `enable_thinking`、温度、`top_p` 等额外推理参数配置。
+当前实现支持按角色切换模型名，不包含 `enable_thinking`、温度、`top_p` 等额外推理参数配置。
 
 ## 本地运行
 
@@ -108,7 +120,7 @@ streamlit run src/smart_clean_agent/web/app.py
 uvicorn smart_clean_agent.api.main:app --app-dir src --reload
 ```
 
-## API 说明
+## API 入口
 
 当前提供 3 个接口：
 
@@ -121,7 +133,7 @@ uvicorn smart_clean_agent.api.main:app --app-dir src --reload
 - Swagger 文档：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/health`
 
-详细接口说明见 [API 使用说明](docs/api_usage_guide.md)。
+详细接口说明见 [API 使用说明](e:/Python/Agent项目/docs/api_usage_guide.md)。
 
 ### 聊天接口示例
 
@@ -143,31 +155,33 @@ Invoke-RestMethod -Method POST `
 
 ## 离线评测
 
-运行：
+项目提供一套独立的离线评测模块，用于复用真实 Agent 链路，对样例集进行结构化评估。
+
+### 默认运行
 
 ```powershell
 python src/smart_clean_agent/evaluation/run.py
 ```
 
-启用 Judge：
+### 启用 Judge
 
 ```powershell
 python src/smart_clean_agent/evaluation/run.py --with-judge
 ```
 
-如果需要临时覆盖评测模型：
+### 覆盖评测模型
 
 ```powershell
 python src/smart_clean_agent/evaluation/run.py --chat-model qwen-plus
 ```
 
-如果需要单独指定 Judge 模型：
+### 指定 Judge 模型
 
 ```powershell
 python src/smart_clean_agent/evaluation/run.py --with-judge --judge-model qwen-turbo
 ```
 
-评测结果默认输出到 `data/eval/results/`，详细说明见 [Eval 使用说明](docs/eval_usage_guide.md)。
+评测结果默认输出到 `data/eval/results/`，详细说明见 [Eval 使用说明](e:/Python/Agent项目/docs/eval_usage_guide.md)。
 
 ## Docker 部署
 
@@ -189,17 +203,32 @@ docker run -p 8000:8000 --env-file .env agent-service
 - 启动 Docker 前请先在本地完成 `python src/smart_clean_agent/rag/ingest.py`
 - 如果镜像里也需要可用向量库，请在部署方案中额外挂载或打包向量库产物
 
-## 当前能力
+## 评测维度
+
+离线评测默认包含三层能力：
+
+- Rule-Based  
+  评估路由、工具依赖、检索模式、时间一致性等结构化行为。
+
+- Point-Based  
+  评估答案是否覆盖样例中定义的核心要点。
+
+- LLM-as-a-Judge  
+  以独立模型对正确性、完整性、groundedness、工具使用与报告质量进行语义评分。
+
+普通问答更关注结果正确性与工具使用合理性；报告链路更关注数据依赖、时间一致性和内容可信度。
+
+## 当前能力范围
 
 - 用户资料管理与会话切换
 - 普通客服问答
 - 天气工具调用
 - RAG 检索问答
-- 使用报告生成
+- 月度报告生成
 - 长期用户记忆
 - 多月趋势记忆
 - Streamlit 演示界面
-- FastAPI 标准服务接口
+- FastAPI 服务接口
 - Docker 部署入口
 - 离线评测与结果对比
 
@@ -211,5 +240,5 @@ docker run -p 8000:8000 --env-file .env agent-service
 
 ## 相关文档
 
-- [API 使用说明](docs/api_usage_guide.md)
-- [Eval 使用说明](docs/eval_usage_guide.md)
+- [API 使用说明](e:/Python/Agent项目/docs/api_usage_guide.md)
+- [Eval 使用说明](e:/Python/Agent项目/docs/eval_usage_guide.md)

@@ -96,6 +96,7 @@ class JudgeEvaluator:
             "optional_points": [asdict(point) for point in case.optional_points],
             "actual_tools": trace.tool_calls,
             "execution_mode": trace.execution_mode,
+            "tool_observations_summary": trace.tool_evidence[:5],
             "retrieved_docs_summary": retrieved_docs_summary,
         }
         response = self.model.invoke(

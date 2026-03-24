@@ -64,6 +64,8 @@ class EvalJudgeTestCase(unittest.TestCase):
         self.assertEqual(result.correctness_score, 4)
         self.assertTrue(result.passed)
         self.assertEqual(result.reason, "回答基本正确")
+        invoked_messages = mock_model.invoke.call_args.args[0]
+        self.assertIn("tool_observations_summary", invoked_messages[-1].content)
 
     @patch("smart_clean_agent.evaluation.judge.create_chat_model")
     def test_judge_evaluate_normalizes_float_and_string_scores(self, mock_create_chat_model):
@@ -104,6 +106,41 @@ class EvalJudgeTestCase(unittest.TestCase):
         self.assertEqual(result.groundedness_score, 5)
         self.assertEqual(result.tool_usage_score, 5)
         self.assertTrue(result.passed)
+
+    @patch("smart_clean_agent.evaluation.judge.create_chat_model")
+    def test_judge_evaluate_includes_tool_evidence(self, mock_create_chat_model):
+        mock_model = Mock()
+        mock_model.invoke.return_value = Mock(
+            content=(
+                '{"correctness_score": 5, "completeness_score": 5, "groundedness_score": 5, '
+                '"tool_usage_score": 5, "report_quality_score": 0, "passed": true, "reason": "包含工具证据"}'
+            )
+        )
+        mock_create_chat_model.return_value = mock_model
+
+        judge = JudgeEvaluator(model_name="qwen-plus")
+        judge.evaluate(
+            EvalCase(
+                case_id="env_003",
+                query="上海这种潮湿天气要不要降低出水量？",
+                category="environment_fit",
+                expected_route="normal",
+                required_tools=["get_weather"],
+                optional_tools=["rag_summarize"],
+                required_points=[EvalPoint("rp_01", "潮湿", ["潮湿"])],
+                optional_points=[],
+                expected_retrieval_mode="optional",
+            ),
+            "建议先低档出水量。",
+            EvalTrace(
+                tool_calls=["get_weather"],
+                tool_evidence=[{"tool_name": "get_weather", "summary": "上海 湿度 78%"}],
+                execution_mode="normal",
+            ),
+        )
+
+        invoked_messages = mock_model.invoke.call_args.args[0]
+        self.assertIn("上海 湿度 78%", invoked_messages[-1].content)
 
 
 if __name__ == "__main__":
