@@ -8,6 +8,7 @@ class AgentRuntimeContext(TypedDict):
     city: str
     force_report_agent: NotRequired[bool]
     execution_mode: NotRequired[str]
+    report_current_month: NotRequired[str]
     session_id: NotRequired[str]
     session_summary: str
     recent_history: str

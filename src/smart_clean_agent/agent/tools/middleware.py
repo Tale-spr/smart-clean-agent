@@ -1,7 +1,7 @@
 from typing import Callable
 
 from langchain.agents import AgentState
-from langchain.agents.middleware import wrap_tool_call, before_model, dynamic_prompt, ModelRequest
+from langchain.agents.middleware import wrap_tool_call, before_model
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
@@ -9,18 +9,17 @@ from langgraph.types import Command
 
 from smart_clean_agent.services.status_event_service import record_status_event
 from smart_clean_agent.utils.logger_handler import logger
-from smart_clean_agent.utils.prompt_loader import load_report_prompts, load_system_prompts
 
 REPORT_TOOL_SEQUENCE = (
     "get_user_id",
     "get_current_month",
-    "fill_context_for_report",
     "fetch_external_data",
     "fetch_external_history",
+    "rag_summarize",
 )
 
 
-def _record_report_tool_sequence(context: dict, tool_name: str) -> None:
+def record_report_tool_sequence(context: dict, tool_name: str) -> None:
     if tool_name not in REPORT_TOOL_SEQUENCE:
         return
 
@@ -30,9 +29,7 @@ def _record_report_tool_sequence(context: dict, tool_name: str) -> None:
         context["report_tool_sequence"] = sequence
 
     required_predecessors: dict[str, tuple[str, ...]] = {
-        "fill_context_for_report": ("get_user_id", "get_current_month"),
-        "fetch_external_data": ("fill_context_for_report",),
-        "fetch_external_history": ("fill_context_for_report",),
+        "fetch_external_history": ("fetch_external_data",),
     }
     missing = [item for item in required_predecessors.get(tool_name, ()) if item not in sequence]
     if missing:
@@ -60,7 +57,7 @@ def monitor_tool(  # 工具执行的监控
         trace_tool_calls.append(tool_name)
 
     if request.runtime.context.get("force_report_agent") or request.runtime.context.get("report"):
-        _record_report_tool_sequence(request.runtime.context, tool_name)
+        record_report_tool_sequence(request.runtime.context, tool_name)
 
     if tool_name == "rag_summarize":
         record_status_event(
@@ -75,13 +72,6 @@ def monitor_tool(  # 工具执行的监控
             event_type="stage.trend",
             title="正在汇总多月趋势",
             detail="正在整理最近多个月的使用趋势记录",
-        )
-    elif tool_name == "fill_context_for_report":
-        record_status_event(
-            request.runtime.context,
-            event_type="stage.report",
-            title="正在生成使用报告",
-            detail="正在切换到报告生成上下文",
         )
     else:
         record_status_event(
@@ -100,8 +90,6 @@ def monitor_tool(  # 工具执行的监控
             title="工具调用完成",
             detail=f"{tool_name} 调用成功",
         )
-        if tool_name == "fill_context_for_report":
-            request.runtime.context["report"] = True
 
         return result
     except Exception as e:
@@ -158,15 +146,4 @@ def build_runtime_context_prompt(context: dict, is_report: bool = False) -> str:
 
     sections.append("请结合以上上下文保持回答连续性；如果当前用户问题与上下文冲突，以当前用户最新问题为准。")
     return "\n\n".join(sections)
-
-
-@dynamic_prompt
-def report_prompt_switch(request: ModelRequest):
-    is_report = request.runtime.context.get("report", False)
-    base_prompt = load_report_prompts() if is_report else load_system_prompts()
-    context_prompt = build_runtime_context_prompt(request.runtime.context, is_report=is_report)
-    if not context_prompt:
-        return base_prompt
-
-    return f"{base_prompt}\n\n{context_prompt}"
 

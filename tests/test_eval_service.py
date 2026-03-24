@@ -135,8 +135,8 @@ class EvalServiceTestCase(unittest.TestCase):
                 query="生成2025-03报告",
                 category="report_generation",
                 expected_route="report",
-                required_tools=["get_user_id", "get_current_month", "fill_context_for_report", "fetch_external_data"],
-                optional_tools=["fetch_external_history"],
+                required_tools=["fetch_external_data"],
+                optional_tools=["get_user_id", "get_current_month", "fetch_external_history", "rag_summarize"],
                 required_points=[
                     EvalPoint("rp_01", "报告", ["报告", "总结"]),
                     EvalPoint("rp_02", "建议", ["建议", "优化建议"]),
@@ -161,7 +161,7 @@ class EvalServiceTestCase(unittest.TestCase):
             "report_001": (
                 "这是2025年3月的一份总结，没有后续动作。",
                 build_eval_trace(
-                    ["get_user_id", "get_current_month", "fill_context_for_report", "fetch_external_data"],
+                    ["fetch_external_data"],
                     [],
                     step_count=2,
                     stop_reason="enough_information",
@@ -373,22 +373,22 @@ class EvalServiceTestCase(unittest.TestCase):
         self.assertFalse(validate_tool_sequence(["rag_summarize", "rag_summarize"]))
 
     def test_validate_report_tool_dependency_checks_required_tools_and_dependency_order(self):
-        required_tools = ["get_user_id", "get_current_month", "fill_context_for_report", "fetch_external_data"]
+        required_tools = ["fetch_external_data"]
         self.assertTrue(
             validate_report_tool_dependency(
-                ["get_user_id", "get_current_month", "fill_context_for_report", "fetch_external_data", "rag_summarize"],
+                ["get_current_month", "fetch_external_data", "rag_summarize"],
                 required_tools,
             )
         )
         self.assertFalse(
             validate_report_tool_dependency(
-                ["get_user_id", "fill_context_for_report", "fetch_external_data"],
+                ["get_user_id", "fetch_external_history"],
                 required_tools,
             )
         )
         self.assertFalse(
             validate_report_tool_dependency(
-                ["fetch_external_data", "fill_context_for_report", "get_user_id", "get_current_month"],
+                ["fetch_external_history", "fetch_external_data", "get_user_id"],
                 required_tools,
             )
         )
@@ -399,8 +399,8 @@ class EvalServiceTestCase(unittest.TestCase):
             query="请生成我2025-06的报告",
             category="report_generation",
             expected_route="report",
-            required_tools=["get_user_id", "get_current_month", "fill_context_for_report", "fetch_external_data"],
-            optional_tools=["fetch_external_history", "rag_summarize"],
+            required_tools=["fetch_external_data"],
+            optional_tools=["get_user_id", "get_current_month", "fetch_external_history", "rag_summarize"],
             required_points=[EvalPoint("rp_01", "报告", ["报告"])],
             optional_points=[],
             expected_retrieval_mode="optional",
@@ -412,7 +412,7 @@ class EvalServiceTestCase(unittest.TestCase):
             lambda _: (
                 "这是2025年6月报告，同时参考了2025年10月-12月趋势。",
                 build_eval_trace(
-                    ["get_user_id", "get_current_month", "fill_context_for_report", "fetch_external_data", "fetch_external_history"],
+                    ["fetch_external_data", "fetch_external_history"],
                     [],
                     execution_mode="report",
                 ),

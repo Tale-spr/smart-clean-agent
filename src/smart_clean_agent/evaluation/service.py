@@ -28,13 +28,12 @@ ALLOWED_TOOLS_BY_ROUTE = {
     "report": {
         "get_user_id",
         "get_current_month",
-        "fill_context_for_report",
         "fetch_external_data",
         "fetch_external_history",
         "rag_summarize",
     },
 }
-VALID_STOP_REASONS = {"", "enough_information", "max_steps_reached", "tool_failed", "unsupported_request"}
+VALID_STOP_REASONS = {"", "enough_information", "max_steps_reached", "tool_failed", "unsupported_request", "consistency_failed"}
 YEAR_MONTH_PATTERN = re.compile(r"(?P<year>\d{4})\s*(?:年|/|-)\s*(?P<month>\d{1,2})\s*月?")
 YEAR_MONTH_RANGE_PATTERN = re.compile(
     r"(?P<year>\d{4})\s*(?:年|/|-)\s*(?P<start>\d{1,2})\s*月?\s*[—\-–~至到]+\s*(?P<end>\d{1,2})\s*月"
@@ -324,10 +323,9 @@ def validate_report_tool_dependency(tool_calls: list[str], required_tools: list[
     return (
         is_before("get_user_id", "fetch_external_data")
         and is_before("get_current_month", "fetch_external_data")
-        and is_before("fill_context_for_report", "fetch_external_data")
-        and is_before("fill_context_for_report", "fetch_external_history")
         and is_before("get_user_id", "fetch_external_history")
         and is_before("get_current_month", "fetch_external_history")
+        and is_before("fetch_external_data", "fetch_external_history")
     )
 
 

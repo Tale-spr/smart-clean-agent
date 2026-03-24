@@ -22,10 +22,10 @@ env_004,我所在的城市最近下雨，机器人清洁要注意什么？,envir
 env_005,广州湿度高，扫拖一体机要怎么保养？,environment_fit,湿度|保养,get_weather,false,1008,广州
 env_006,现在我所在城市适不适合高频湿拖？,environment_fit,湿拖|天气,get_user_location,false,1003,杭州
 env_007,南京最近天气怎样，会不会影响回充和导航？,environment_fit,天气|导航,get_weather,false,1010,南京
-report_001,请根据我2025-03的使用记录生成一份报告。,report_generation,报告|建议,fill_context_for_report,false,1001,北京
-report_002,帮我看一下我2025-04的机器人使用情况，并给出保养建议。,report_generation,使用情况|保养建议,fill_context_for_report,false,1002,上海
+report_001,请根据我2025-03的使用记录生成一份报告。,report_generation,报告|建议,fetch_external_data,false,1001,北京
+report_002,帮我看一下我2025-04的机器人使用情况，并给出保养建议。,report_generation,使用情况|保养建议,fetch_external_data,false,1002,上海
 report_003,请结合我2025-05的记录，分析下清洁效率和耗材状态。,report_generation,清洁效率|耗材,fetch_external_data,false,1007,成都
-report_004,给我出一份2025-06的使用报告，顺便说说要不要更换耗材。,report_generation,使用报告|耗材,fill_context_for_report,false,1009,武汉
+report_004,给我出一份2025-06的使用报告，顺便说说要不要更换耗材。,report_generation,使用报告|耗材,fetch_external_data,false,1009,武汉
 report_005,根据我2025-07的机器人记录，帮我总结问题并给建议。,report_generation,建议|问题,fetch_external_data,false,1006,苏州
-report_006,请生成我2025-08的扫地机器人使用报告。,report_generation,使用报告|建议,fill_context_for_report,false,1004,深圳
+report_006,请生成我2025-08的扫地机器人使用报告。,report_generation,使用报告|建议,fetch_external_data,false,1004,深圳
 report_007,结合我2025-09的数据，帮我做个简短报告并指出提升方向。,report_generation,报告|提升,fetch_external_data,false,1005,合肥
