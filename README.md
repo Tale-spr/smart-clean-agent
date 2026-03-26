@@ -23,11 +23,7 @@
 
 两条链路共享同一套服务层、会话存储、用户记忆和评测体系。
 
-## 效果截图
-
-![聊天演示截图占位](docs/images/chat-home.png)
-![报告生成截图占位](docs/images/report-demo.png)
-![API 健康检查截图占位](docs/images/api-health.png)
+![系统架构图](docs/images/系统架构图.png)
 
 ## 技术栈
 
