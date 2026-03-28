@@ -67,6 +67,11 @@ class ReactAgentTestCase(unittest.TestCase):
             "session_summary": "",
             "recent_history": "",
             "user_memory_summary": "",
+            "user_memory_payload": {},
+            "retrieved_user_memory_summary": "",
+            "retrieved_user_memory_fields": [],
+            "memory_retrieval_reason": "",
+            "is_new_session_first_turn": False,
             "report_memory_summary": "",
             "trace_tool_calls": [],
             "react_trace": [],
@@ -243,6 +248,97 @@ class ReactAgentTestCase(unittest.TestCase):
         normalize_traces = [item for item in runtime_context["react_trace"] if item["phase"] == "normalize"]
         self.assertTrue(normalize_traces)
         self.assertIn("fallback=true", normalize_traces[0]["content"])
+
+    def test_new_session_smalltalk_does_not_retrieve_long_term_memory(self):
+        agent, _, _, _, _, _, _ = self._build_agent(
+            normalization_answer='{"normalized_query":"你好","intent":"direct","needs_weather":false,"needs_knowledge":false,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":[],"reason":"寒暄","confidence":"high"}'
+        )
+        runtime_context = self._build_runtime_context()
+        runtime_context["is_new_session_first_turn"] = True
+        runtime_context["user_memory_payload"] = {
+            "profile_snapshot": {"city": "上海", "house_type": "70㎡公寓", "floor_type": "瓷砖"},
+            "preferences": ["湿拖偏好"],
+            "environment": ["瓷砖", "小户型"],
+            "cleaning_habits": ["高频清扫"],
+            "pain_points": ["滤网维护"],
+            "recent_focuses": ["拖地出水量"],
+        }
+
+        result = agent.execute("你好", runtime_context)
+
+        self.assertEqual(result, "这是最终回答。")
+        self.assertEqual(runtime_context["retrieved_user_memory_summary"], "")
+        self.assertEqual(runtime_context["retrieved_user_memory_fields"], [])
+        self.assertEqual(runtime_context["memory_retrieval_reason"], "skip_for_smalltalk_or_weather")
+        prompt_text = agent.chat_model.messages[-1].content
+        self.assertNotIn("用户长期记忆", prompt_text)
+        self.assertNotIn("瓷砖", prompt_text)
+
+    def test_weather_query_does_not_retrieve_long_term_memory(self):
+        agent, _, _, _, _, _, _ = self._build_agent(
+            normalization_answer='{"normalized_query":"北京今天天气怎么样","intent":"weather","needs_weather":true,"needs_knowledge":false,"city":"北京","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["weather"],"reason":"天气查询","confidence":"high"}'
+        )
+        runtime_context = self._build_runtime_context()
+        runtime_context["user_memory_payload"] = {
+            "profile_snapshot": {"city": "北京", "house_type": "70㎡公寓", "floor_type": "木地板"},
+            "preferences": ["湿拖偏好"],
+            "environment": ["木地板", "养宠"],
+            "cleaning_habits": ["高频清扫"],
+            "pain_points": ["漏扫问题"],
+            "recent_focuses": ["拖地出水量"],
+        }
+
+        agent.execute("北京今天天气怎么样？", runtime_context)
+
+        self.assertEqual(runtime_context["retrieved_user_memory_summary"], "")
+        self.assertEqual(runtime_context["retrieved_user_memory_fields"], [])
+        self.assertEqual(runtime_context["memory_retrieval_reason"], "skip_for_smalltalk_or_weather")
+
+    def test_environment_query_retrieves_environment_and_preferences(self):
+        agent, _, rag_tool, _, _, _, _ = self._build_agent(
+            normalization_answer='{"normalized_query":"这种天气适不适合拖地","intent":"combined","needs_weather":true,"needs_knowledge":true,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["city","weather","knowledge"],"reason":"环境适配问题","confidence":"high"}'
+        )
+        runtime_context = self._build_runtime_context()
+        runtime_context["user_memory_payload"] = {
+            "profile_snapshot": {"city": "北京", "house_type": "70㎡公寓", "floor_type": "木地板"},
+            "preferences": ["湿拖偏好"],
+            "environment": ["木地板", "养宠"],
+            "cleaning_habits": ["高频清扫"],
+            "pain_points": ["漏扫问题"],
+            "recent_focuses": ["拖地出水量"],
+        }
+
+        agent.execute("这种天气适不适合拖地？", runtime_context)
+
+        self.assertIn("environment", runtime_context["retrieved_user_memory_fields"])
+        self.assertIn("preferences", runtime_context["retrieved_user_memory_fields"])
+        self.assertIn("木地板", runtime_context["retrieved_user_memory_summary"])
+        self.assertIn("湿拖偏好", runtime_context["retrieved_user_memory_summary"])
+        prompt_text = agent.chat_model.messages[-1].content
+        self.assertIn("相关环境特征", prompt_text)
+        self.assertIn("木地板", prompt_text)
+        self.assertEqual(rag_tool.calls[0], {"query": "这种天气适不适合拖地"})
+
+    def test_troubleshooting_query_retrieves_pain_points(self):
+        agent, _, rag_tool, _, _, _, _ = self._build_agent(
+            normalization_answer='{"normalized_query":"最近总漏扫怎么办","intent":"knowledge","needs_weather":false,"needs_knowledge":true,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["knowledge"],"reason":"故障排查问题","confidence":"high"}'
+        )
+        runtime_context = self._build_runtime_context()
+        runtime_context["user_memory_payload"] = {
+            "profile_snapshot": {"city": "北京", "house_type": "70㎡公寓", "floor_type": "木地板"},
+            "preferences": ["湿拖偏好"],
+            "environment": ["木地板", "养宠"],
+            "cleaning_habits": ["高频清扫"],
+            "pain_points": ["漏扫问题", "滤网维护"],
+            "recent_focuses": ["最近总漏扫怎么办", "滤网清洗"],
+        }
+
+        agent.execute("最近总漏扫怎么办？", runtime_context)
+
+        self.assertIn("pain_points", runtime_context["retrieved_user_memory_fields"])
+        self.assertIn("recent_focuses", runtime_context["retrieved_user_memory_fields"])
+        self.assertIn("漏扫问题", runtime_context["retrieved_user_memory_summary"])
+        self.assertEqual(rag_tool.calls[0], {"query": "最近总漏扫怎么办"})
 
 
 if __name__ == "__main__":

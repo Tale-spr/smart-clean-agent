@@ -13,6 +13,11 @@ class AgentRuntimeContext(TypedDict):
     session_summary: str
     recent_history: str
     user_memory_summary: str
+    user_memory_payload: dict[str, Any]
+    retrieved_user_memory_summary: str
+    retrieved_user_memory_fields: list[str]
+    memory_retrieval_reason: str
+    is_new_session_first_turn: bool
     report_memory_summary: str
     trace_tool_calls: NotRequired[list[str]]
     react_trace: NotRequired[list[dict[str, str]]]

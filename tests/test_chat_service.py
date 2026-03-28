@@ -66,6 +66,9 @@ class ChatServiceTestCase(unittest.TestCase):
         self.assertEqual(agent.query, "北京今天天气怎么样？")
         self.assertEqual(agent.runtime_context["user_id"], "1001")
         self.assertEqual(agent.runtime_context["city"], "北京")
+        self.assertTrue(agent.runtime_context["is_new_session_first_turn"])
+        self.assertIn("user_memory_payload", agent.runtime_context)
+        self.assertEqual(agent.runtime_context["retrieved_user_memory_summary"], "")
         saved_messages = mock_save_session.call_args.args[1]["messages"]
         self.assertEqual(saved_messages[0]["role"], "user")
         self.assertEqual(saved_messages[1]["role"], "assistant")

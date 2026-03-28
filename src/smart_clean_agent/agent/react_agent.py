@@ -23,6 +23,7 @@ REPORT_KNOWLEDGE_KEYWORDS = ("保养", "维护", "建议", "耗材", "更换", "
 WEATHER_KEYWORDS = ("天气", "气温", "温度", "湿度", "下雨", "降雨", "空气", "潮湿", "干燥", "回南天", "梅雨天", "回南", "梅雨")
 DOMAIN_KEYWORDS = ("扫地机器人", "扫拖", "机器人", "清洁", "拖地", "湿拖", "吸力", "滚刷", "滤网", "水箱", "避障", "回充", "漏扫", "地图", "导航", "保养", "维护", "地板", "木地板", "地毯", "瓷砖", "滚刷更换", "主刷", "边刷", "拖布", "HEPA", "粉尘", "WiFi", "门槛", "水痕")
 SMALLTALK_KEYWORDS = ("你好", "您好", "谢谢", "感谢", "你是谁", "再见")
+CAPABILITY_QUERY_KEYWORDS = ("你能帮我做什么", "你能做什么", "可以帮我做什么", "你会什么", "能帮我什么", "能做什么")
 IMPLICIT_LOCATION_KEYWORDS = ("我所在城市", "当前城市", "现在这里", "我这边", "所在城市")
 ENVIRONMENT_DECISION_KEYWORDS = ("适不适合", "适合", "能不能", "要不要", "会不会影响", "有什么影响")
 WEATHER_KNOWLEDGE_KEYWORDS = ("保养", "存放", "耗材", "回充", "导航", "地图", "避障", "滤网", "滚刷", "拖布", "出水量", "水箱", "故障")
@@ -39,6 +40,9 @@ class ReActGraphState(TypedDict):
     normalization_payload: dict[str, Any]
     normalization_confidence: str
     normalization_fallback_used: bool
+    retrieved_user_memory_summary: str
+    retrieved_user_memory_fields: list[str]
+    memory_retrieval_reason: str
     intent: str
     known_facts: dict[str, str]
     tool_history: list[dict[str, Any]]
@@ -145,6 +149,9 @@ class ReactAgent:
             "normalization_payload": {},
             "normalization_confidence": "low",
             "normalization_fallback_used": False,
+            "retrieved_user_memory_summary": "",
+            "retrieved_user_memory_fields": [],
+            "memory_retrieval_reason": "",
             "intent": "",
             "known_facts": {},
             "tool_history": [],
@@ -293,8 +300,35 @@ class ReactAgent:
                 remaining_questions = []
                 stop_reason = "unsupported_request"
 
+        retrieved_user_memory_fields, retrieved_user_memory_summary, memory_retrieval_reason = self._retrieve_user_memory_for_normal_query(
+            raw_query=raw_query,
+            normalized_query=query,
+            intent=intent,
+            known_facts=known_facts,
+            runtime_context=runtime_context,
+        )
+        runtime_context["retrieved_user_memory_fields"] = retrieved_user_memory_fields
+        runtime_context["retrieved_user_memory_summary"] = retrieved_user_memory_summary
+        runtime_context["memory_retrieval_reason"] = memory_retrieval_reason
+        self._append_react_trace(
+            runtime_context,
+            phase="memory",
+            content=(
+                f"fields={','.join(retrieved_user_memory_fields) or '-'}; "
+                f"reason={memory_retrieval_reason or '-'}"
+            ),
+        )
+
         self._append_react_trace(runtime_context, phase="analyze", content=f"intent={intent}; remaining={','.join(remaining_questions) or '-'}")
-        return {"intent": intent, "known_facts": known_facts, "remaining_questions": remaining_questions, "stop_reason": stop_reason}
+        return {
+            "intent": intent,
+            "known_facts": known_facts,
+            "remaining_questions": remaining_questions,
+            "stop_reason": stop_reason,
+            "retrieved_user_memory_fields": retrieved_user_memory_fields,
+            "retrieved_user_memory_summary": retrieved_user_memory_summary,
+            "memory_retrieval_reason": memory_retrieval_reason,
+        }
 
     def _select_tool_or_finish(self, state: ReActGraphState) -> dict[str, Any]:
         runtime_context = state["runtime_context"]
@@ -743,6 +777,10 @@ class ReactAgent:
     def _is_smalltalk(self, query: str) -> bool:
         return any(keyword in query for keyword in SMALLTALK_KEYWORDS)
 
+    def _is_capability_query(self, query: str) -> bool:
+        normalized = query.strip()
+        return any(keyword in normalized for keyword in CAPABILITY_QUERY_KEYWORDS)
+
     def _needs_weather(self, query: str) -> bool:
         if any(keyword in query for keyword in WEATHER_KEYWORDS):
             return True
@@ -775,6 +813,157 @@ class ReactAgent:
     def _build_rag_query(self, query: str) -> str:
         cleaned = re.sub(r"[？?！!。,.，]", " ", query.strip())
         return re.sub(r"\s+", " ", cleaned).strip()
+
+    def _retrieve_user_memory_for_normal_query(
+        self,
+        *,
+        raw_query: str,
+        normalized_query: str,
+        intent: str,
+        known_facts: dict[str, str],
+        runtime_context: AgentRuntimeContext,
+    ) -> tuple[list[str], str, str]:
+        payload = runtime_context.get("user_memory_payload") or {}
+        if not isinstance(payload, dict) or not payload:
+            return [], "", "no_user_memory_payload"
+
+        merged_query = f"{raw_query} {normalized_query}".strip()
+        if self._should_skip_user_memory_retrieval(
+            merged_query=merged_query,
+            intent=intent,
+            runtime_context=runtime_context,
+        ):
+            return [], "", "skip_for_smalltalk_or_weather"
+
+        selected_fields: list[str] = []
+        lowered_query = merged_query.lower()
+
+        environment_keywords = ("适合", "适不适合", "拖地", "湿拖", "出水量", "地板", "地面", "宠物", "养猫", "养狗", "毛发", "缠绕")
+        cleaning_plan_keywords = ("计划", "模式", "频率", "每天", "每日", "预约", "定时", "清扫", "拖扫", "拖地")
+        troubleshooting_keywords = ("漏扫", "回充", "缠绕", "滤网", "水箱", "地图", "联网", "故障", "主刷", "边刷", "滚刷", "拖布", "怎么办")
+        profile_keywords = ("户型", "地板", "地面", "小户型", "大户型", "老人", "儿童", "城市")
+
+        if intent == "combined" or any(keyword in merged_query for keyword in environment_keywords):
+            selected_fields.extend(["environment", "preferences"])
+        if any(keyword in merged_query for keyword in cleaning_plan_keywords):
+            selected_fields.extend(["cleaning_habits", "preferences", "environment"])
+        if any(keyword in lowered_query for keyword in troubleshooting_keywords):
+            selected_fields.extend(["pain_points", "recent_focuses"])
+        if any(keyword in merged_query for keyword in profile_keywords):
+            selected_fields.append("profile_snapshot")
+
+        if not selected_fields:
+            return [], "", "no_relevant_memory_fields"
+
+        deduped_fields: list[str] = []
+        for field in selected_fields:
+            if field not in deduped_fields:
+                deduped_fields.append(field)
+
+        summary = self._build_retrieved_user_memory_summary(
+            payload=payload,
+            selected_fields=deduped_fields,
+            query=merged_query,
+            known_facts=known_facts,
+        )
+        if not summary:
+            return [], "", "selected_fields_empty_after_filter"
+        return deduped_fields, summary, "retrieved_relevant_user_memory"
+
+    def _should_skip_user_memory_retrieval(
+        self,
+        *,
+        merged_query: str,
+        intent: str,
+        runtime_context: AgentRuntimeContext,
+    ) -> bool:
+        if runtime_context.get("is_new_session_first_turn") and (
+            intent == "direct" or self._is_smalltalk(merged_query) or self._is_capability_query(merged_query)
+        ):
+            return True
+        if self._is_smalltalk(merged_query) or self._is_capability_query(merged_query):
+            return True
+        if intent == "weather":
+            return True
+        return False
+
+    def _build_retrieved_user_memory_summary(
+        self,
+        *,
+        payload: dict[str, Any],
+        selected_fields: list[str],
+        query: str,
+        known_facts: dict[str, str],
+    ) -> str:
+        lines: list[str] = []
+        profile_snapshot = payload.get("profile_snapshot") or {}
+
+        if "profile_snapshot" in selected_fields and isinstance(profile_snapshot, dict):
+            profile_parts: list[str] = []
+            city = (profile_snapshot.get("city") or "").strip()
+            house_type = (profile_snapshot.get("house_type") or "").strip()
+            floor_type = (profile_snapshot.get("floor_type") or "").strip()
+            if "城市" in query and city:
+                profile_parts.append(f"城市: {city}")
+            if any(token in query for token in ("户型", "小户型", "大户型", "老人", "儿童")) and house_type:
+                profile_parts.append(f"户型: {house_type}")
+            if any(token in query for token in ("地板", "地面", "拖地", "湿拖", "出水量")) and floor_type:
+                profile_parts.append(f"地面: {floor_type}")
+            if profile_parts:
+                lines.append("用户画像: " + "；".join(profile_parts))
+
+        field_labels = {
+            "preferences": "相关偏好",
+            "environment": "相关环境特征",
+            "cleaning_habits": "相关清洁习惯",
+            "pain_points": "相关历史问题",
+            "recent_focuses": "相关最近关注",
+        }
+        for field in ("preferences", "environment", "cleaning_habits", "pain_points", "recent_focuses"):
+            if field not in selected_fields:
+                continue
+            values = payload.get(field) or []
+            if not isinstance(values, list):
+                continue
+            filtered_values = self._filter_user_memory_field_values(field, values, query, known_facts)
+            if filtered_values:
+                lines.append(f"{field_labels[field]}: " + "、".join(filtered_values[:3]))
+
+        return "\n".join(lines).strip()
+
+    def _filter_user_memory_field_values(
+        self,
+        field_name: str,
+        values: list[Any],
+        query: str,
+        known_facts: dict[str, str],
+    ) -> list[str]:
+        normalized_values = [str(value).strip() for value in values if str(value).strip()]
+        if not normalized_values:
+            return []
+
+        tokens_map: dict[str, tuple[str, ...]] = {
+            "preferences": ("湿拖", "拖地", "静音", "安静"),
+            "environment": ("木地板", "瓷砖", "地毯", "养宠", "宠物", "猫", "狗", "小户型", "大户型", "多层", "老人", "儿童"),
+            "cleaning_habits": ("定时", "预约", "每天", "每日", "高频", "沿边", "清扫", "拖地"),
+            "pain_points": ("避障", "回充", "漏扫", "主刷", "缠绕", "滤网", "水箱", "地图", "联网", "故障", "滚刷", "拖布"),
+            "recent_focuses": ("木地板", "瓷砖", "地毯", "养宠", "漏扫", "回充", "缠绕", "滤网", "水箱", "拖地", "湿拖", "出水量", "滚刷", "拖布"),
+        }
+        query_tokens = tokens_map.get(field_name, ())
+        matched = [value for value in normalized_values if any(token in query or token in value for token in query_tokens)]
+
+        if field_name == "environment" and not matched and (
+            "出水量" in query or "拖地" in query or "湿拖" in query or known_facts.get("weather_premise_type")
+        ):
+            matched = [value for value in normalized_values if value in {"木地板", "瓷砖", "地毯", "养宠", "小户型", "大户型"}]
+
+        if field_name == "preferences" and not matched and ("拖地" in query or "湿拖" in query or "出水量" in query):
+            matched = [value for value in normalized_values if "湿拖" in value or "静音" in value]
+
+        if field_name == "recent_focuses" and matched and "pain_points" not in known_facts:
+            return matched[:2]
+
+        return matched or (normalized_values[:2] if field_name in {"environment", "preferences"} and ("适合" in query or "建议" in query) else [])
 
     def _extract_json_payload(self, content: Any) -> dict[str, Any]:
         normalized = content if isinstance(content, str) else str(content or "")

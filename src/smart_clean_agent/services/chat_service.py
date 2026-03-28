@@ -82,6 +82,8 @@ def _run_agent_interaction(
         raise ChatServiceError("用户资料不存在", code="user_not_found", status_code=404)
 
     session_data = _load_target_session(normalized_user_id, session_id)
+    original_messages = list(session_data.get("messages", []))
+    is_new_session_first_turn = len(original_messages) == 0
     updated_messages = list(session_data.get("messages", []))
     updated_messages.append({"role": "user", "content": normalized_query})
     session_data["messages"] = updated_messages
@@ -109,6 +111,7 @@ def _run_agent_interaction(
         status_events=status_events,
         status_event_callback=callback,
         force_report_agent=force_report_agent,
+        is_new_session_first_turn=is_new_session_first_turn,
     )
 
     runtime_agent = agent or get_chat_agent()
@@ -150,16 +153,19 @@ def _build_runtime_context(
     status_events: list[dict[str, str]],
     status_event_callback: Callable[[dict[str, str]], Any] | None,
     force_report_agent: bool,
+    is_new_session_first_turn: bool,
 ) -> AgentRuntimeContext:
     messages = session_data.get("messages", [])
     user_id = profile["user_id"]
     user_memory_summary = ""
+    user_memory_payload: dict[str, Any] = {}
     report_memory_summary = ""
 
     try:
         user_memory = load_user_memory(user_id)
         if not user_memory.get("profile_snapshot"):
             user_memory["profile_snapshot"] = build_profile_snapshot(profile)
+        user_memory_payload = user_memory
         user_memory_summary = build_user_memory_summary(user_memory)
     except Exception as exc:
         logger.warning(f"[ChatService]构建用户长期记忆上下文失败: {str(exc)}")
@@ -182,6 +188,11 @@ def _build_runtime_context(
         "session_summary": summarize_messages(messages),
         "recent_history": build_recent_history(messages),
         "user_memory_summary": user_memory_summary,
+        "user_memory_payload": user_memory_payload,
+        "retrieved_user_memory_summary": "",
+        "retrieved_user_memory_fields": [],
+        "memory_retrieval_reason": "",
+        "is_new_session_first_turn": is_new_session_first_turn,
         "report_memory_summary": report_memory_summary,
         "trace_tool_calls": [],
         "react_trace": [],

@@ -128,7 +128,11 @@ def log_before_model(
 def build_runtime_context_prompt(context: dict, is_report: bool = False) -> str:
     session_summary = (context.get("session_summary") or "").strip()
     recent_history = (context.get("recent_history") or "").strip()
-    user_memory_summary = (context.get("user_memory_summary") or "").strip()
+    user_memory_summary = (
+        (context.get("user_memory_summary") or "").strip()
+        if is_report
+        else (context.get("retrieved_user_memory_summary") or "").strip()
+    )
     report_memory_summary = (context.get("report_memory_summary") or "").strip()
     if not session_summary and not recent_history and not user_memory_summary and (not is_report or not report_memory_summary):
         return ""
