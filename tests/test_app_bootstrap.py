@@ -70,6 +70,7 @@ class AppBootstrapTestCase(unittest.TestCase):
         mock_react_agent,
     ):
         mock_create_chat_model.return_value = sentinel.chat_model
+        mock_create_chat_model.side_effect = [sentinel.chat_model, sentinel.normalization_model]
         mock_create_embedding_model.return_value = sentinel.embedding_model
         mock_vector_store_service.return_value = sentinel.vector_store_service
         mock_rag_service.return_value = sentinel.rag_service
@@ -85,7 +86,14 @@ class AppBootstrapTestCase(unittest.TestCase):
             vector_store_service=sentinel.vector_store_service,
         )
         mock_create_agent_tools.assert_called_once_with(sentinel.rag_service)
-        mock_react_agent.assert_called_once_with(model=sentinel.chat_model, tools=sentinel.tools)
+        self.assertEqual(mock_create_chat_model.call_count, 2)
+        mock_create_chat_model.assert_any_call()
+        mock_create_chat_model.assert_any_call(role="normalization")
+        mock_react_agent.assert_called_once_with(
+            model=sentinel.chat_model,
+            tools=sentinel.tools,
+            normalization_model=sentinel.normalization_model,
+        )
 
     @patch("smart_clean_agent.web.bootstrap.initialize_memory_state")
     @patch("smart_clean_agent.web.bootstrap.ensure_active_session")

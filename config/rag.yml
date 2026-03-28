@@ -3,4 +3,5 @@ models:
   rag_chat: qwen-plus
   batch_eval: qwen-flash
   judge: qwen-plus
+  normalization: qwen-flash
   embedding: text-embedding-v4

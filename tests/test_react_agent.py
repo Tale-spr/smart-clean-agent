@@ -37,9 +37,14 @@ class ReactAgentTestCase(unittest.TestCase):
         current_month_result: str = "2026-03",
         external_data_result: str = "月份: 2026-03\n特征: 高频清扫\n清洁效率: 良好\n耗材: 正常\n对比: 稳定",
         history_result: str = "最近3个月趋势稳定",
+        normalization_answer: str | None = None,
     ):
         agent = ReactAgent.__new__(ReactAgent)
         agent.chat_model = DummyModel(answer=answer)
+        agent.normalization_model = DummyModel(
+            answer=normalization_answer
+            or '{"normalized_query":"今天天气怎么样","intent":"weather","needs_weather":true,"needs_knowledge":false,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["city","weather"],"reason":"天气查询","confidence":"high"}'
+        )
         user_id_tool = DummyTool("get_user_id", user_id_result)
         get_current_month_tool = DummyTool("get_current_month", current_month_result)
         weather_tool = DummyTool("get_weather", weather_result)
@@ -85,7 +90,9 @@ class ReactAgentTestCase(unittest.TestCase):
         self.assertEqual(runtime_context["react_step_count"], 2)
 
     def test_execute_weather_query_with_city_calls_weather_directly(self):
-        agent, weather_tool, rag_tool, _, _, _, _ = self._build_agent()
+        agent, weather_tool, rag_tool, _, _, _, _ = self._build_agent(
+            normalization_answer='{"normalized_query":"上海今天温度怎么样","intent":"weather","needs_weather":true,"needs_knowledge":false,"city":"上海","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["weather"],"reason":"显式城市天气查询","confidence":"high"}'
+        )
         runtime_context = self._build_runtime_context()
 
         result = agent.execute("上海今天温度怎么样？", runtime_context)
@@ -99,6 +106,7 @@ class ReactAgentTestCase(unittest.TestCase):
         agent, weather_tool, rag_tool, _, _, _, _ = self._build_agent()
         runtime_context = self._build_runtime_context()
         runtime_context["city"] = "杭州"
+        agent.normalization_model.answer = '{"normalized_query":"当前城市是否适合高频湿拖","intent":"weather","needs_weather":true,"needs_knowledge":false,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["city","weather"],"reason":"环境适配问题","confidence":"high"}'
 
         result = agent.execute("现在我所在城市适不适合高频湿拖？", runtime_context)
 
@@ -111,6 +119,7 @@ class ReactAgentTestCase(unittest.TestCase):
     def test_execute_weather_plus_maintenance_query_calls_weather_then_rag(self):
         agent, weather_tool, rag_tool, _, _, _, _ = self._build_agent()
         runtime_context = self._build_runtime_context()
+        agent.normalization_model.answer = '{"normalized_query":"广州湿度高，扫拖一体机要怎么保养","intent":"combined","needs_weather":true,"needs_knowledge":true,"city":"广州","user_weather_premise_type":"humid","user_weather_premise_text":"用户明确提到当前环境潮湿或湿度较高","missing_slots":["weather","knowledge"],"reason":"天气与保养建议组合问题","confidence":"high"}'
 
         result = agent.execute("广州湿度高，扫拖一体机要怎么保养？", runtime_context)
 
@@ -120,7 +129,9 @@ class ReactAgentTestCase(unittest.TestCase):
         self.assertEqual(rag_tool.calls[0], {"query": "广州湿度高 扫拖一体机要怎么保养"})
 
     def test_execute_knowledge_query_calls_rag_only(self):
-        agent, _, rag_tool, _, _, _, _ = self._build_agent()
+        agent, _, rag_tool, _, _, _, _ = self._build_agent(
+            normalization_answer='{"normalized_query":"滚刷更换后需要注意什么","intent":"knowledge","needs_weather":false,"needs_knowledge":true,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["knowledge"],"reason":"知识型问题","confidence":"high"}'
+        )
         runtime_context = self._build_runtime_context()
 
         result = agent.execute("滚刷更换后需要注意什么？", runtime_context)
@@ -151,6 +162,7 @@ class ReactAgentTestCase(unittest.TestCase):
             rag_result="木地板家庭拖地时建议控制出水量，避免地板受潮。"
         )
         runtime_context = self._build_runtime_context()
+        agent.normalization_model.answer = '{"normalized_query":"木地板家庭选扫拖机器人要注意什么","intent":"knowledge","needs_weather":false,"needs_knowledge":true,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["knowledge"],"reason":"知识型问题","confidence":"high"}'
 
         result = agent.execute("木地板家庭选扫拖机器人要注意什么？", runtime_context)
 
@@ -179,6 +191,7 @@ class ReactAgentTestCase(unittest.TestCase):
         )
         runtime_context = self._build_runtime_context()
         runtime_context["city"] = "深圳"
+        agent.normalization_model.answer = '{"normalized_query":"当前城市最近下雨，机器人清洁要注意什么","intent":"weather","needs_weather":true,"needs_knowledge":false,"city":"","user_weather_premise_type":"rain","user_weather_premise_text":"用户明确提到最近下雨或处于雨天场景","missing_slots":["city","weather"],"reason":"雨天环境问题","confidence":"high"}'
 
         result = agent.execute("我所在的城市最近下雨，机器人清洁要注意什么？", runtime_context)
 
@@ -201,6 +214,35 @@ class ReactAgentTestCase(unittest.TestCase):
         self.assertEqual(runtime_context["trace_tool_calls"], ["get_current_month", "fetch_external_data"])
         self.assertEqual(get_current_month_tool.calls, [{}])
         self.assertEqual(external_data_tool.calls[0]["month"], "2026-03")
+
+    def test_normalize_query_combined_intent_turns_ambiguous_dragging_question_into_weather_and_knowledge(self):
+        agent, weather_tool, rag_tool, _, _, _, _ = self._build_agent(
+            normalization_answer='{"normalized_query":"当前天气是否适合拖地","intent":"combined","needs_weather":true,"needs_knowledge":true,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":["city","weather","knowledge"],"reason":"天气与拖地建议组合问题","confidence":"high"}'
+        )
+        runtime_context = self._build_runtime_context()
+        runtime_context["city"] = "北京"
+
+        result = agent.execute("我这边这种天适不适合拖地？", runtime_context)
+
+        self.assertEqual(result, "这是最终回答。")
+        self.assertEqual(runtime_context["trace_tool_calls"], ["get_user_location", "get_weather", "rag_summarize"])
+        self.assertEqual(weather_tool.calls[0], {"city": "北京"})
+        self.assertEqual(rag_tool.calls[0], {"query": "当前天气是否适合拖地"})
+        self.assertFalse(runtime_context["react_trace"] == [])
+        self.assertIn("normalize", [item["phase"] for item in runtime_context["react_trace"]])
+
+    def test_normalize_query_invalid_json_falls_back_to_heuristics(self):
+        agent, weather_tool, _, _, _, _, _ = self._build_agent(normalization_answer="not json")
+        runtime_context = self._build_runtime_context()
+
+        result = agent.execute("上海今天温度怎么样？", runtime_context)
+
+        self.assertEqual(result, "这是最终回答。")
+        self.assertEqual(runtime_context["trace_tool_calls"], ["get_weather"])
+        self.assertEqual(weather_tool.calls[0], {"city": "上海"})
+        normalize_traces = [item for item in runtime_context["react_trace"] if item["phase"] == "normalize"]
+        self.assertTrue(normalize_traces)
+        self.assertIn("fallback=true", normalize_traces[0]["content"])
 
 
 if __name__ == "__main__":

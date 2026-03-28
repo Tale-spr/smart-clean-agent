@@ -12,6 +12,7 @@ CHAT_MODEL_ROLE_MAP = {
     "rag_chat": "rag_chat",
     "batch_eval": "batch_eval",
     "judge": "judge",
+    "normalization": "normalization",
 }
 
 

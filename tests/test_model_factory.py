@@ -14,6 +14,7 @@ class ModelFactoryTestCase(unittest.TestCase):
         self.assertEqual(get_chat_model_name("primary_chat"), "qwen-plus")
         self.assertEqual(get_chat_model_name("batch_eval"), "qwen-flash")
         self.assertEqual(get_chat_model_name("judge"), "qwen-plus")
+        self.assertEqual(get_chat_model_name("normalization"), "qwen-flash")
 
     def test_get_chat_model_name_rejects_unknown_role(self):
         with self.assertRaises(ValueError):

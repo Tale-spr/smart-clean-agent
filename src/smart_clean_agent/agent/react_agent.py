@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime
 from typing import Any, NotRequired, TypedDict
@@ -12,7 +13,7 @@ from smart_clean_agent.agent.tools.agent_tools import get_user_location_from_con
 from smart_clean_agent.agent.tools.middleware import build_runtime_context_prompt, record_report_tool_sequence
 from smart_clean_agent.services.status_event_service import record_status_event
 from smart_clean_agent.utils.logger_handler import logger
-from smart_clean_agent.utils.prompt_loader import load_report_prompts, load_system_prompts
+from smart_clean_agent.utils.prompt_loader import load_query_normalize_prompt, load_report_prompts, load_system_prompts
 
 MAX_REACT_STEPS = 5
 STOP_REASONS = {"enough_information", "max_steps_reached", "tool_failed", "unsupported_request", "consistency_failed"}
@@ -32,7 +33,12 @@ YEAR_MONTH_PATTERN = re.compile(r"(?P<year>\d{4})\s*(?:年|/|-)\s*(?P<month>\d{1
 
 class ReActGraphState(TypedDict):
     query: str
+    raw_query: str
     runtime_context: AgentRuntimeContext
+    normalized_query: str
+    normalization_payload: dict[str, Any]
+    normalization_confidence: str
+    normalization_fallback_used: bool
     intent: str
     known_facts: dict[str, str]
     tool_history: list[dict[str, Any]]
@@ -68,8 +74,9 @@ class ReportGraphState(TypedDict):
 
 
 class ReactAgent:
-    def __init__(self, model: BaseChatModel, tools: list[BaseTool]):
+    def __init__(self, model: BaseChatModel, tools: list[BaseTool], normalization_model: BaseChatModel | None = None):
         self.chat_model = model
+        self.normalization_model = normalization_model or model
         self.tools = tools
         self.tool_map = {tool.name: tool for tool in tools}
         self.normal_graph = self._build_normal_graph()
@@ -93,12 +100,14 @@ class ReactAgent:
 
     def _build_normal_graph(self):
         graph = StateGraph(ReActGraphState)
+        graph.add_node("normalize_query", self._normalize_query)
         graph.add_node("analyze_question", self._analyze_question)
         graph.add_node("select_tool_or_finish", self._select_tool_or_finish)
         graph.add_node("execute_tool", self._execute_tool)
         graph.add_node("observe_tool_result", self._observe_tool_result)
         graph.add_node("generate_answer", self._generate_answer)
-        graph.add_edge(START, "analyze_question")
+        graph.add_edge(START, "normalize_query")
+        graph.add_edge("normalize_query", "analyze_question")
         graph.add_edge("analyze_question", "select_tool_or_finish")
         graph.add_conditional_edges("select_tool_or_finish", self._route_after_selection, {"execute_tool": "execute_tool", "generate_answer": "generate_answer"})
         graph.add_edge("execute_tool", "observe_tool_result")
@@ -128,7 +137,23 @@ class ReactAgent:
         runtime_context.setdefault("trace_tool_calls", [])
         runtime_context.setdefault("react_trace", [])
         runtime_context.setdefault("tool_evidence", [])
-        initial_state: ReActGraphState = {"query": query, "runtime_context": runtime_context, "intent": "", "known_facts": {}, "tool_history": [], "observations": [], "remaining_questions": [], "final_answer": "", "step_count": 0, "stop_reason": ""}
+        initial_state: ReActGraphState = {
+            "query": query,
+            "raw_query": query,
+            "runtime_context": runtime_context,
+            "normalized_query": query,
+            "normalization_payload": {},
+            "normalization_confidence": "low",
+            "normalization_fallback_used": False,
+            "intent": "",
+            "known_facts": {},
+            "tool_history": [],
+            "observations": [],
+            "remaining_questions": [],
+            "final_answer": "",
+            "step_count": 0,
+            "stop_reason": "",
+        }
         try:
             final_state = self.normal_graph.invoke(initial_state)
             runtime_context["react_stop_reason"] = final_state.get("stop_reason", "")
@@ -160,49 +185,113 @@ class ReactAgent:
             record_status_event(runtime_context, event_type="error.agent", title="回答生成失败", detail=str(exc), level="error")
             raise
 
+    def _normalize_query(self, state: ReActGraphState) -> dict[str, Any]:
+        runtime_context = state["runtime_context"]
+        raw_query = (state.get("raw_query") or state["query"]).strip()
+        record_status_event(runtime_context, event_type="stage.model", title="正在理解问题表述", detail="正在归一化用户问题并提取稳定意图")
+
+        payload = self._default_normalization_payload(raw_query)
+        fallback_used = False
+        try:
+            response = self.normalization_model.invoke(
+                [
+                    SystemMessage(content=load_query_normalize_prompt()),
+                    HumanMessage(
+                        content=(
+                            f"用户问题:\n{raw_query}\n\n"
+                            f"上下文用户ID: {runtime_context.get('user_id', '')}\n"
+                            f"上下文城市: {runtime_context.get('city', '')}\n"
+                            f"会话摘要:\n{runtime_context.get('session_summary', '')}\n\n"
+                            f"最近历史:\n{runtime_context.get('recent_history', '')}"
+                        )
+                    ),
+                ]
+            )
+            content = getattr(response, "content", "")
+            payload = self._normalize_normalization_payload(self._extract_json_payload(content), raw_query)
+        except Exception as exc:
+            fallback_used = True
+            logger.warning(f"[NormalizeQuery]归一化失败，回退启发式规则: {str(exc)}")
+            payload = self._fallback_normalization_payload(raw_query)
+
+        self._append_react_trace(
+            runtime_context,
+            phase="normalize",
+            content=(
+                f"intent={payload['intent'] or '-'}; confidence={payload['confidence']}; "
+                f"normalized={payload['normalized_query']}; fallback={str(fallback_used).lower()}"
+            ),
+        )
+        return {
+            "normalized_query": payload["normalized_query"],
+            "normalization_payload": payload,
+            "normalization_confidence": payload["confidence"],
+            "normalization_fallback_used": fallback_used,
+        }
+
     def _analyze_question(self, state: ReActGraphState) -> dict[str, Any]:
         runtime_context = state["runtime_context"]
-        query = state["query"].strip()
+        query = (state.get("normalized_query") or state["query"]).strip()
+        raw_query = (state.get("raw_query") or state["query"]).strip()
         record_status_event(runtime_context, event_type="stage.model", title="正在分析问题", detail="正在判断是否需要检索知识库或调用工具")
 
-        weather_needed = self._needs_weather(query)
-        knowledge_needed = self._needs_knowledge(query)
-        direct_reply = self._is_smalltalk(query)
-        known_facts: dict[str, str] = {}
-        explicit_city = self._extract_city(query)
-        if explicit_city:
-            known_facts["city"] = explicit_city
-        weather_premise = self._extract_weather_premise(query)
-        if weather_premise:
-            known_facts["user_weather_premise"] = weather_premise["text"]
-            known_facts["weather_premise_type"] = weather_premise["type"]
-
-        if direct_reply and not weather_needed and not knowledge_needed:
-            intent = "direct"
-            remaining_questions: list[str] = []
-            stop_reason = "enough_information"
-        elif weather_needed and knowledge_needed:
-            intent = "combined"
-            remaining_questions = []
-            if "city" not in known_facts:
-                remaining_questions.append("city")
-            remaining_questions.extend(["weather", "knowledge"])
-            stop_reason = ""
-        elif weather_needed:
-            intent = "weather"
-            remaining_questions = []
-            if "city" not in known_facts:
-                remaining_questions.append("city")
-            remaining_questions.append("weather")
-            stop_reason = ""
-        elif knowledge_needed:
-            intent = "knowledge"
-            remaining_questions = ["knowledge"]
-            stop_reason = ""
+        normalization_payload = state.get("normalization_payload") or {}
+        if normalization_payload and normalization_payload.get("intent"):
+            intent = str(normalization_payload.get("intent") or "")
+            known_facts: dict[str, str] = {}
+            explicit_city = str(normalization_payload.get("city") or "").strip()
+            if explicit_city:
+                known_facts["city"] = explicit_city
+            weather_premise_type = str(normalization_payload.get("user_weather_premise_type") or "").strip()
+            weather_premise_text = str(normalization_payload.get("user_weather_premise_text") or "").strip()
+            if weather_premise_type and weather_premise_text:
+                known_facts["user_weather_premise"] = weather_premise_text
+                known_facts["weather_premise_type"] = weather_premise_type
+            remaining_questions = self._normalize_missing_slots(
+                normalization_payload,
+                intent=intent,
+                has_city=bool(explicit_city),
+            )
+            stop_reason = "unsupported_request" if intent == "unsupported" else ("enough_information" if intent == "direct" and not remaining_questions else "")
         else:
-            intent = "unsupported"
-            remaining_questions = []
-            stop_reason = "unsupported_request"
+            weather_needed = self._needs_weather(query)
+            knowledge_needed = self._needs_knowledge(query)
+            direct_reply = self._is_smalltalk(query)
+            known_facts = {}
+            explicit_city = self._extract_city(query)
+            if explicit_city:
+                known_facts["city"] = explicit_city
+            weather_premise = self._extract_weather_premise(raw_query)
+            if weather_premise:
+                known_facts["user_weather_premise"] = weather_premise["text"]
+                known_facts["weather_premise_type"] = weather_premise["type"]
+
+            if direct_reply and not weather_needed and not knowledge_needed:
+                intent = "direct"
+                remaining_questions = []
+                stop_reason = "enough_information"
+            elif weather_needed and knowledge_needed:
+                intent = "combined"
+                remaining_questions = []
+                if "city" not in known_facts:
+                    remaining_questions.append("city")
+                remaining_questions.extend(["weather", "knowledge"])
+                stop_reason = ""
+            elif weather_needed:
+                intent = "weather"
+                remaining_questions = []
+                if "city" not in known_facts:
+                    remaining_questions.append("city")
+                remaining_questions.append("weather")
+                stop_reason = ""
+            elif knowledge_needed:
+                intent = "knowledge"
+                remaining_questions = ["knowledge"]
+                stop_reason = ""
+            else:
+                intent = "unsupported"
+                remaining_questions = []
+                stop_reason = "unsupported_request"
 
         self._append_react_trace(runtime_context, phase="analyze", content=f"intent={intent}; remaining={','.join(remaining_questions) or '-'}")
         return {"intent": intent, "known_facts": known_facts, "remaining_questions": remaining_questions, "stop_reason": stop_reason}
@@ -229,7 +318,7 @@ class ReactAgent:
         elif next_gap == "weather":
             decision = ("get_weather", {"city": state.get("known_facts", {}).get("city", "")})
         else:
-            decision = ("rag_summarize", {"query": self._build_rag_query(state["query"])})
+            decision = ("rag_summarize", {"query": self._build_rag_query(state.get("normalized_query") or state["query"])})
 
         self._append_react_trace(runtime_context, phase="decide", content=f"action={decision[0]}; gap={next_gap}")
         return {"selected_tool": decision[0], "selected_tool_args": decision[1]}
@@ -524,7 +613,7 @@ class ReactAgent:
 
     def _build_final_answer(self, state: ReActGraphState) -> str:
         runtime_context = state["runtime_context"]
-        query = state["query"]
+        query = state.get("raw_query") or state["query"]
         known_facts = state.get("known_facts", {})
         observations = state.get("observations", [])
         stop_reason = state.get("stop_reason", "") or "enough_information"
@@ -687,6 +776,121 @@ class ReactAgent:
         cleaned = re.sub(r"[？?！!。,.，]", " ", query.strip())
         return re.sub(r"\s+", " ", cleaned).strip()
 
+    def _extract_json_payload(self, content: Any) -> dict[str, Any]:
+        normalized = content if isinstance(content, str) else str(content or "")
+        normalized = normalized.strip()
+        if normalized.startswith("```"):
+            normalized = re.sub(r"^```(?:json)?\s*", "", normalized)
+            normalized = re.sub(r"\s*```$", "", normalized)
+        start = normalized.find("{")
+        end = normalized.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("未找到合法 JSON 对象")
+        return json.loads(normalized[start : end + 1])
+
+    def _default_normalization_payload(self, raw_query: str) -> dict[str, Any]:
+        return {
+            "normalized_query": raw_query,
+            "intent": "",
+            "needs_weather": False,
+            "needs_knowledge": False,
+            "city": "",
+            "user_weather_premise_type": "",
+            "user_weather_premise_text": "",
+            "missing_slots": [],
+            "reason": "",
+            "confidence": "low",
+        }
+
+    def _normalize_normalization_payload(self, payload: dict[str, Any], raw_query: str) -> dict[str, Any]:
+        normalized = self._default_normalization_payload(raw_query)
+        normalized["normalized_query"] = str(payload.get("normalized_query") or raw_query).strip() or raw_query
+
+        intent = str(payload.get("intent") or "").strip()
+        if intent in {"direct", "weather", "knowledge", "combined", "unsupported"}:
+            normalized["intent"] = intent
+
+        normalized["needs_weather"] = self._coerce_bool(payload.get("needs_weather"))
+        normalized["needs_knowledge"] = self._coerce_bool(payload.get("needs_knowledge"))
+        normalized["city"] = str(payload.get("city") or "").strip()
+
+        premise_type = str(payload.get("user_weather_premise_type") or "").strip()
+        normalized["user_weather_premise_type"] = premise_type if premise_type in {"", "rain", "humid", "dry"} else ""
+        normalized["user_weather_premise_text"] = str(payload.get("user_weather_premise_text") or "").strip()
+
+        confidence = str(payload.get("confidence") or "").strip().lower()
+        normalized["confidence"] = confidence if confidence in {"high", "medium", "low"} else "low"
+        normalized["reason"] = str(payload.get("reason") or "").strip()
+
+        allowed_slots = {"city", "weather", "knowledge"}
+        missing_slots: list[str] = []
+        for slot in payload.get("missing_slots") or []:
+            if slot in allowed_slots and slot not in missing_slots:
+                missing_slots.append(slot)
+        normalized["missing_slots"] = missing_slots
+        return normalized
+
+    def _fallback_normalization_payload(self, raw_query: str) -> dict[str, Any]:
+        payload = self._default_normalization_payload(raw_query)
+        weather_needed = self._needs_weather(raw_query)
+        knowledge_needed = self._needs_knowledge(raw_query)
+        explicit_city = self._extract_city(raw_query)
+        premise = self._extract_weather_premise(raw_query)
+
+        if self._is_smalltalk(raw_query) and not weather_needed and not knowledge_needed:
+            payload["intent"] = "direct"
+            payload["confidence"] = "medium"
+        elif weather_needed and knowledge_needed:
+            payload["intent"] = "combined"
+            payload["needs_weather"] = True
+            payload["needs_knowledge"] = True
+            payload["confidence"] = "low"
+        elif weather_needed:
+            payload["intent"] = "weather"
+            payload["needs_weather"] = True
+            payload["confidence"] = "low"
+        elif knowledge_needed:
+            payload["intent"] = "knowledge"
+            payload["needs_knowledge"] = True
+            payload["confidence"] = "low"
+        else:
+            payload["intent"] = "unsupported"
+            payload["confidence"] = "low"
+
+        payload["city"] = explicit_city
+        if premise:
+            payload["user_weather_premise_type"] = premise["type"]
+            payload["user_weather_premise_text"] = premise["text"]
+        payload["missing_slots"] = self._normalize_missing_slots(payload, intent=payload["intent"], has_city=bool(explicit_city))
+        return payload
+
+    def _normalize_missing_slots(self, payload: dict[str, Any], intent: str, has_city: bool) -> list[str]:
+        missing_slots = [slot for slot in payload.get("missing_slots", []) if slot in {"city", "weather", "knowledge"}]
+        needs_weather = bool(payload.get("needs_weather"))
+        needs_knowledge = bool(payload.get("needs_knowledge"))
+        if intent in {"weather", "combined"} and not has_city and "city" not in missing_slots:
+            missing_slots.insert(0, "city")
+        if needs_weather and "weather" not in missing_slots:
+            missing_slots.append("weather")
+        if needs_knowledge and "knowledge" not in missing_slots:
+            missing_slots.append("knowledge")
+        if intent == "direct":
+            return []
+        if intent == "unsupported" and not missing_slots:
+            return []
+        normalized: list[str] = []
+        for slot in missing_slots:
+            if slot not in normalized:
+                normalized.append(slot)
+        return normalized
+
+    def _coerce_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return False
+
     def _build_report_rag_query(self, state: ReportGraphState) -> str:
         query = self._build_rag_query(state["query"])
         monthly_record = (state.get("known_facts", {}).get("monthly_record") or "").strip()
@@ -739,7 +943,7 @@ class ReactAgent:
         return False
 
     def _should_use_guarded_environment_answer(self, state: ReActGraphState) -> bool:
-        query = state["query"]
+        query = (state.get("normalized_query") or state["query"]).strip()
         known_facts = state.get("known_facts", {})
         premise_type = known_facts.get("weather_premise_type")
         if premise_type in {"humid", "rain"} and "出水量" in query:
@@ -749,7 +953,7 @@ class ReactAgent:
         return False
 
     def _build_guarded_environment_answer(self, state: ReActGraphState) -> str:
-        query = state["query"]
+        query = (state.get("normalized_query") or state["query"]).strip()
         known_facts = state.get("known_facts", {})
         premise_type = known_facts.get("weather_premise_type", "")
         weather_info = (known_facts.get("weather_info") or "").strip()
