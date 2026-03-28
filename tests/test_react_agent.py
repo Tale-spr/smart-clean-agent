@@ -202,6 +202,9 @@ class ReactAgentTestCase(unittest.TestCase):
 
         self.assertIn("防滑", result)
         self.assertIn("防潮", result)
+        self.assertNotIn("结论：", result)
+        self.assertNotIn("依据：", result)
+        self.assertNotIn("建议：", result)
         self.assertEqual(runtime_context["trace_tool_calls"], ["get_user_location", "get_weather"])
         self.assertEqual(weather_tool.calls[0], {"city": "深圳"})
 
@@ -266,13 +269,23 @@ class ReactAgentTestCase(unittest.TestCase):
 
         result = agent.execute("你好", runtime_context)
 
-        self.assertEqual(result, "这是最终回答。")
+        self.assertIn("你好", result)
         self.assertEqual(runtime_context["retrieved_user_memory_summary"], "")
         self.assertEqual(runtime_context["retrieved_user_memory_fields"], [])
         self.assertEqual(runtime_context["memory_retrieval_reason"], "skip_for_smalltalk_or_weather")
-        prompt_text = agent.chat_model.messages[-1].content
-        self.assertNotIn("用户长期记忆", prompt_text)
-        self.assertNotIn("瓷砖", prompt_text)
+        self.assertIsNone(agent.chat_model.messages)
+
+    def test_capability_query_returns_natural_intro_without_model_generation(self):
+        agent, _, _, _, _, _, _ = self._build_agent(
+            normalization_answer='{"normalized_query":"你能帮我做什么","intent":"direct","needs_weather":false,"needs_knowledge":false,"city":"","user_weather_premise_type":"","user_weather_premise_text":"","missing_slots":[],"reason":"能力询问","confidence":"high"}'
+        )
+        runtime_context = self._build_runtime_context()
+
+        result = agent.execute("你能帮我做什么？", runtime_context)
+
+        self.assertIn("我可以帮你", result)
+        self.assertNotIn("结论：", result)
+        self.assertIsNone(agent.chat_model.messages)
 
     def test_weather_query_does_not_retrieve_long_term_memory(self):
         agent, _, _, _, _, _, _ = self._build_agent(
@@ -293,6 +306,10 @@ class ReactAgentTestCase(unittest.TestCase):
         self.assertEqual(runtime_context["retrieved_user_memory_summary"], "")
         self.assertEqual(runtime_context["retrieved_user_memory_fields"], [])
         self.assertEqual(runtime_context["memory_retrieval_reason"], "skip_for_smalltalk_or_weather")
+        prompt_text = agent.chat_model.messages[-1].content
+        self.assertIn("自然、简洁、直接", prompt_text)
+        self.assertNotIn("结论 + 依据 + 建议", prompt_text)
+        self.assertIn("不要使用“结论：”“依据：”“建议：”", prompt_text)
 
     def test_environment_query_retrieves_environment_and_preferences(self):
         agent, _, rag_tool, _, _, _, _ = self._build_agent(
@@ -317,6 +334,8 @@ class ReactAgentTestCase(unittest.TestCase):
         prompt_text = agent.chat_model.messages[-1].content
         self.assertIn("相关环境特征", prompt_text)
         self.assertIn("木地板", prompt_text)
+        self.assertIn("自然、专业、像真实客服交流", prompt_text)
+        self.assertNotIn("结论 + 依据 + 建议", prompt_text)
         self.assertEqual(rag_tool.calls[0], {"query": "这种天气适不适合拖地"})
 
     def test_troubleshooting_query_retrieves_pain_points(self):

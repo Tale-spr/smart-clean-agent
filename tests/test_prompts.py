@@ -9,6 +9,7 @@ class PromptRulesTestCase(unittest.TestCase):
 
         self.assertNotIn("每次调用工具前，必须输出**真实的自然语言思考过程**", prompt)
         self.assertIn("不要向用户展示内部思考过程", prompt)
+        self.assertIn("不要使用“结论：”“依据：”“建议：”", prompt)
 
     def test_report_prompt_does_not_require_visible_chain_of_thought(self):
         prompt = load_report_prompts()

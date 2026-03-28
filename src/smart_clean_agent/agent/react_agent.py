@@ -437,14 +437,19 @@ class ReactAgent:
         record_status_event(runtime_context, event_type="stage.final", title="正在生成最终建议", detail="正在整理工具结果、知识库内容与上下文信息")
 
         known_facts = state.get("known_facts", {})
-        if stop_reason == "unsupported_request" and not known_facts:
+        answer_style = self._determine_answer_style(state)
+        if answer_style == "smalltalk":
+            answer = self._build_smalltalk_answer(state)
+        elif answer_style == "capability_intro":
+            answer = self._build_capability_intro_answer()
+        elif stop_reason == "unsupported_request" and not known_facts:
             answer = "我不知道"
         elif stop_reason in {"tool_failed", "max_steps_reached"} and not known_facts:
             answer = "我不知道"
         elif self._should_use_guarded_environment_answer(state):
             answer = self._build_guarded_environment_answer(state)
         else:
-            answer = self._build_final_answer(state)
+            answer = self._build_final_answer(state, answer_style=answer_style)
 
         self._append_react_trace(runtime_context, phase="finish", content=f"stop_reason={stop_reason}")
         return {"final_answer": answer}
@@ -645,7 +650,7 @@ class ReactAgent:
         self._append_react_trace(runtime_context, phase="validate", content="consistency_passed")
         return {"stop_reason": stop_reason}
 
-    def _build_final_answer(self, state: ReActGraphState) -> str:
+    def _build_final_answer(self, state: ReActGraphState, *, answer_style: str) -> str:
         runtime_context = state["runtime_context"]
         query = state.get("raw_query") or state["query"]
         known_facts = state.get("known_facts", {})
@@ -678,7 +683,10 @@ class ReactAgent:
             human_sections.append("天气工具返回与用户明确描述存在差异。不要直接否定用户前提，请说明信息差异，并按更保守的场景给建议。")
         if known_facts.get("weather_premise_type") in {"humid", "rain"} and "出水量" in query:
             human_sections.append("对于潮湿或雨天与出水量调整相关的问题，如果知识库没有明确支持，不要输出“无需降低出水量”这类强结论，应优先给出保守建议。")
-        human_sections.append("要求：使用“结论 + 依据 + 建议”的最小完整结构；回答保持简洁，但不要遗漏用户问题中的关键部件名、场景名、天气要素或建议动作。")
+        if answer_style == "concise_fact":
+            human_sections.append("回答风格：自然、简洁、直接。优先用 1 到 2 句先回答用户问题，必要时再补一句原因或提醒；不要使用“结论：”“依据：”“建议：”等显式标题。")
+        else:
+            human_sections.append("回答风格：自然、专业、像真实客服交流。先直接回答用户问题，再在必要时自然补充原因和可执行建议；最多使用两小段，不要使用“结论：”“依据：”“建议：”等显式标题。")
         human_sections.append("只输出最终回答；不要暴露内部推理、步骤、工具名或中间分析。")
         return self._invoke_model(load_system_prompts(), human_sections)
 
@@ -780,6 +788,31 @@ class ReactAgent:
     def _is_capability_query(self, query: str) -> bool:
         normalized = query.strip()
         return any(keyword in normalized for keyword in CAPABILITY_QUERY_KEYWORDS)
+
+    def _determine_answer_style(self, state: ReActGraphState) -> str:
+        query = (state.get("raw_query") or state["query"]).strip()
+        intent = state.get("intent", "")
+        known_facts = state.get("known_facts", {})
+        if self._is_smalltalk(query):
+            return "smalltalk"
+        if self._is_capability_query(query):
+            return "capability_intro"
+        if intent == "weather" and "knowledge_info" not in known_facts:
+            return "concise_fact"
+        return "natural_advice"
+
+    def _build_smalltalk_answer(self, state: ReActGraphState) -> str:
+        query = (state.get("raw_query") or state["query"]).strip()
+        if any(token in query for token in ("谢谢", "感谢")):
+            return "不客气，有需要随时告诉我。"
+        if "再见" in query:
+            return "好的，随时需要时再来找我。"
+        if "你是谁" in query:
+            return "我是扫地机器人客服助手，可以帮你看使用建议、保养维护、故障排查和报告生成。"
+        return "你好，我可以帮你解答扫地机器人使用、保养、故障排查和环境适配相关问题。"
+
+    def _build_capability_intro_answer(self) -> str:
+        return "我可以帮你查看天气对使用的影响，解答扫地机器人使用、保养和故障排查问题，也可以生成月度使用报告。"
 
     def _needs_weather(self, query: str) -> bool:
         if any(keyword in query for keyword in WEATHER_KEYWORDS):
@@ -1158,15 +1191,15 @@ class ReactAgent:
 
         if "出水量" in query and premise_type in {"humid", "rain"}:
             return (
-                "结论：在潮湿或下雨环境下，建议先使用低档或中低档出水量，再根据地面残留和水痕情况微调。\n"
-                f"依据：{'；'.join(basis_parts) if basis_parts else '当前问题属于潮湿环境下的湿拖参数调整场景。'}\n"
-                "建议：优先避免高档出水量；若地面已经偏湿、通风较差或容易留下水痕，应进一步降低出水量，并在清洁后及时擦干机身底部和拖布。"
+                "在潮湿或下雨环境下，建议先从低档或中低档出水量开始，再根据地面残留和水痕情况慢慢微调。"
+                f"{' ' + '；'.join(basis_parts) if basis_parts else ''}"
+                "如果地面本身已经偏湿、通风较差或容易留下水痕，就尽量不要直接开高档出水量，清洁后也记得及时擦干机身底部和拖布。"
             )
 
         return (
-            "结论：雨天或地面易潮湿时，机器人清洁可以继续，但要更注意防滑、防潮和传感器误判风险。\n"
-            f"依据：{'；'.join(basis_parts) if basis_parts else '当前问题属于雨天清洁注意事项场景。'}\n"
-            "建议：先清理积水或明显潮湿区域，避免机器人驶入湿滑地面；检查传感器与底盘是否受潮，清洁完成后及时擦干机身和拖布，并留意回充区域是否因潮湿导致识别异常。"
+            "雨天或地面容易潮湿时，机器人一般还能继续清洁，但要更注意防滑、防潮和传感器误判。"
+            f"{' ' + '；'.join(basis_parts) if basis_parts else ''}"
+            "使用前先处理积水或明显湿滑区域，避免机器人直接驶入过湿地面；清洁完成后及时擦干机身和拖布，再顺手检查一下底盘、传感器和回充区域有没有受潮。"
         )
 
     def _remove_gap(self, remaining_questions: list[str], gap_name: str) -> list[str]:
